@@ -1,0 +1,20 @@
+#[derive(Debug, Clone, PartialEq)]
+pub enum Token {
+    Select, Insert, Update, Delete,
+    Create, Drop, Table, Index,
+    From, Where, Set, Values,
+    Into, On,
+    And, Or, Not, Null, True, False,
+    Begin, Commit, Rollback, Transaction,
+    Primary, Key,
+    Integer, Text, Real, Blob,
+    Identifier(String),
+    StringLiteral(String),
+    NumberLiteral(i64),
+    FloatLiteral(f64),
+    Equal, NotEqual, Less, Greater,
+    LessEqual, GreaterEqual,
+    Plus, Minus, Star, Slash,
+    Semicolon, Comma, LParen, RParen,
+    Eof,
+}

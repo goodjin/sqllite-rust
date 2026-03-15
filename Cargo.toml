@@ -1,0 +1,20 @@
+[package]
+name = "sqllite-rust"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sqllite-rust"
+path = "src/main.rs"
+
+[lib]
+name = "sqllite_rust"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1.0"
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.0"
+criterion = "0.5"
