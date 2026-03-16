@@ -5,3 +5,4 @@ pub mod vm;
 pub mod transaction;
 pub mod index;
 pub mod executor;
+pub mod columnar;
