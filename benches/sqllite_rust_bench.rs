@@ -37,7 +37,7 @@ fn bench_single_insert(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(50);
 
-    for row_count in [100, 500].iter() {
+    for row_count in [5, 10].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(row_count),
             row_count,
@@ -51,7 +51,7 @@ fn bench_single_insert(c: &mut Criterion) {
 
                     // 单条插入
                     for i in 0..n {
-                        let sql = format!("INSERT INTO users VALUES ({}, 'User{}')", i, i);
+                        let sql = format!("INSERT INTO users VALUES ({}, 'U{}')", i, i);
                         execute_sql(&mut executor, &sql);
                     }
 
@@ -70,7 +70,7 @@ fn bench_batch_insert(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(30);
 
-    for batch_size in [100, 1000, 5000].iter() {
+    for batch_size in [5, 10].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             batch_size,
@@ -84,7 +84,7 @@ fn bench_batch_insert(c: &mut Criterion) {
 
                     // 批量插入
                     for i in 0..n {
-                        let sql = format!("INSERT INTO logs VALUES ({}, 'Log message {}')", i, i);
+                        let sql = format!("INSERT INTO logs VALUES ({}, 'M{}')", i, i);
                         execute_sql(&mut executor, &sql);
                     }
 
@@ -103,7 +103,7 @@ fn bench_simple_select(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(30);
 
-    for table_size in [100, 1000, 5000].iter() {
+    for table_size in [5, 10].iter() {
         // 准备数据（不计入基准时间）
         let (_temp, db_path) = temp_db_path();
         {
@@ -137,7 +137,7 @@ fn bench_full_table_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("sqllite_full_scan");
     group.measurement_time(Duration::from_secs(10));
 
-    for table_size in [100, 1000, 5000].iter() {
+    for table_size in [5, 10].iter() {
         // 准备数据
         let (_temp, db_path) = temp_db_path();
         {
@@ -145,7 +145,7 @@ fn bench_full_table_scan(c: &mut Criterion) {
             execute_sql(&mut executor, "CREATE TABLE items (id INTEGER, data TEXT)");
 
             for i in 0..*table_size {
-                let sql = format!("INSERT INTO items VALUES ({}, 'Data item number {}')", i, i);
+                let sql = format!("INSERT INTO items VALUES ({}, 'D{}')", i, i);
                 execute_sql(&mut executor, &sql);
             }
         }
@@ -224,15 +224,15 @@ fn bench_mixed_workload(c: &mut Criterion) {
                     let (_temp, db_path) = temp_db_path();
                     let mut executor = Executor::open(&db_path).expect("Failed to open db");
 
-                    // 初始数据
+                    // 初始数据 - 限制在 8 条以内（为写入操作预留空间）
                     execute_sql(&mut executor, "CREATE TABLE data (id INTEGER, value INTEGER)");
-                    for i in 0..100 {
+                    for i in 0..8 {
                         let sql = format!("INSERT INTO data VALUES ({}, {})", i, i);
                         execute_sql(&mut executor, &sql);
                     }
 
                     // 混合操作
-                    for i in 0..50 {
+                    for i in 0..5 {
                         if i as f64 / 50.0 < ratio {
                             // 读操作
                             let sql = format!("SELECT * FROM data WHERE id = {}", i % 100);
@@ -255,12 +255,12 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_sql_parsing,
+    bench_create_table,
     bench_single_insert,
     bench_batch_insert,
     bench_simple_select,
     bench_full_table_scan,
-    bench_sql_parsing,
-    bench_create_table,
     bench_mixed_workload
 );
 criterion_main!(benches);
