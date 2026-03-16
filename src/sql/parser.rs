@@ -49,8 +49,81 @@ impl<'a> Parser<'a> {
         self.consume(Token::From)?;
         let table = self.consume_identifier()?;
 
+        // Parse JOIN clauses
+        let mut joins = Vec::new();
+        loop {
+            let join_type = if self.match_token(Token::Join) {
+                Some(crate::sql::ast::JoinType::Inner)
+            } else if self.match_token(Token::Inner) {
+                self.consume(Token::Join)?;
+                Some(crate::sql::ast::JoinType::Inner)
+            } else if self.match_token(Token::Left) {
+                self.consume(Token::Join)?;
+                Some(crate::sql::ast::JoinType::Left)
+            } else {
+                None
+            };
+
+            if let Some(join_type) = join_type {
+                let join_table = self.consume_identifier()?;
+                self.consume(Token::On)?;
+                let on_condition = self.parse_expression()?;
+                joins.push(crate::sql::ast::Join {
+                    table: join_table,
+                    join_type,
+                    on_condition,
+                });
+            } else {
+                break;
+            }
+        }
+
         let where_clause = if self.match_token(Token::Where) {
             Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
+        let group_by = if self.match_token(Token::Group) {
+            self.consume(Token::By)?;
+            self.parse_column_list()?
+        } else {
+            Vec::new()
+        };
+
+        let having = if self.match_token(Token::Having) {
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
+        let order_by = if self.match_token(Token::Order) {
+            self.consume(Token::By)?;
+            self.parse_order_by_list()?
+        } else {
+            Vec::new()
+        };
+
+        let limit = if self.match_token(Token::Limit) {
+            if let Token::NumberLiteral(n) = &self.current {
+                let n = *n;
+                self.advance();
+                Some(n)
+            } else {
+                return Err(ParseError::UnexpectedToken(format!("{:?}", self.current)));
+            }
+        } else {
+            None
+        };
+
+        let offset = if self.match_token(Token::Offset) {
+            if let Token::NumberLiteral(n) = &self.current {
+                let n = *n;
+                self.advance();
+                Some(n)
+            } else {
+                return Err(ParseError::UnexpectedToken(format!("{:?}", self.current)));
+            }
         } else {
             None
         };
@@ -58,7 +131,13 @@ impl<'a> Parser<'a> {
         Ok(Statement::Select(SelectStmt {
             columns,
             from: table,
+            joins,
             where_clause,
+            group_by,
+            having,
+            order_by,
+            limit,
+            offset,
         }))
     }
 
@@ -69,8 +148,65 @@ impl<'a> Parser<'a> {
             columns.push(SelectColumn::All);
         } else {
             loop {
-                let col = self.consume_identifier()?;
-                columns.push(SelectColumn::Column(col));
+                // Check for aggregate functions
+                let select_col = match &self.current {
+                    Token::Count => {
+                        self.advance();
+                        self.consume(Token::LParen)?;
+                        if self.match_token(Token::Star) {
+                            SelectColumn::Aggregate(AggregateFunc::CountStar)
+                        } else {
+                            let expr = self.parse_expression()?;
+                            SelectColumn::Aggregate(AggregateFunc::Count(expr))
+                        }
+                    }
+                    Token::Sum => {
+                        self.advance();
+                        self.consume(Token::LParen)?;
+                        let expr = self.parse_expression()?;
+                        SelectColumn::Aggregate(AggregateFunc::Sum(expr))
+                    }
+                    Token::Avg => {
+                        self.advance();
+                        self.consume(Token::LParen)?;
+                        let expr = self.parse_expression()?;
+                        SelectColumn::Aggregate(AggregateFunc::Avg(expr))
+                    }
+                    Token::Min => {
+                        self.advance();
+                        self.consume(Token::LParen)?;
+                        let expr = self.parse_expression()?;
+                        SelectColumn::Aggregate(AggregateFunc::Min(expr))
+                    }
+                    Token::Max => {
+                        self.advance();
+                        self.consume(Token::LParen)?;
+                        let expr = self.parse_expression()?;
+                        SelectColumn::Aggregate(AggregateFunc::Max(expr))
+                    }
+                    _ => {
+                        // Regular column or expression
+                        if let Token::Identifier(col) = &self.current {
+                            let col = col.clone();
+                            self.advance();
+                            SelectColumn::Column(col)
+                        } else {
+                            // Try to parse as expression
+                            let expr = self.parse_expression()?;
+                            // For now, only support column expressions in non-aggregate context
+                            // This is a simplification - in a full implementation we'd handle
+                            // arbitrary expressions here
+                            return Err(ParseError::UnexpectedToken(format!("{:?}", self.current)));
+                        }
+                    }
+                };
+
+                // Consume closing paren for aggregate functions
+                if matches!(select_col, SelectColumn::Aggregate(_)) {
+                    self.consume(Token::RParen)?;
+                }
+
+                columns.push(select_col);
 
                 if !self.match_token(Token::Comma) {
                     break;
@@ -79,6 +215,27 @@ impl<'a> Parser<'a> {
         }
 
         Ok(columns)
+    }
+
+    fn parse_order_by_list(&mut self) -> Result<Vec<OrderBy>> {
+        let mut order_by = Vec::new();
+        loop {
+            let column = self.consume_identifier()?;
+            let descending = if self.match_token(Token::Desc) {
+                true
+            } else {
+                self.match_token(Token::Asc); // ASC is default, consume if present
+                false
+            };
+            order_by.push(OrderBy {
+                column,
+                descending,
+            });
+            if !self.match_token(Token::Comma) {
+                break;
+            }
+        }
+        Ok(order_by)
     }
 
     fn parse_insert(&mut self) -> Result<Statement> {
@@ -348,6 +505,10 @@ impl<'a> Parser<'a> {
             Token::Text => {
                 self.advance();
                 Ok(DataType::Text)
+            }
+            Token::Blob => {
+                self.advance();
+                Ok(DataType::Blob)
             }
             _ => Err(ParseError::UnexpectedToken(format!("{:?}", self.current))),
         }

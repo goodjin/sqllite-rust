@@ -9,9 +9,10 @@ use std::path::Path;
 
 use crate::pager::cache::PageCache;
 use crate::pager::header::DatabaseHeader;
-use crate::pager::page::{Page, PageId, PAGE_SIZE};
+use crate::pager::page::{Page, PAGE_SIZE};
 
 pub use crate::pager::error::{PagerError, Result};
+pub use crate::pager::page::PageId;
 
 pub struct Pager {
     file: File,

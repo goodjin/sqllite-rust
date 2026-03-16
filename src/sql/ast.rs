@@ -16,13 +16,49 @@ pub enum Statement {
 pub struct SelectStmt {
     pub columns: Vec<SelectColumn>,
     pub from: String,
+    pub joins: Vec<Join>,
     pub where_clause: Option<Expression>,
+    pub group_by: Vec<String>,
+    pub having: Option<Expression>,
+    pub order_by: Vec<OrderBy>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Join {
+    pub table: String,
+    pub join_type: JoinType,
+    pub on_condition: Expression,
+}
+
+#[derive(Debug, Clone)]
+pub enum JoinType {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderBy {
+    pub column: String,
+    pub descending: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum SelectColumn {
     All,
     Column(String),
+    Aggregate(AggregateFunc),
+}
+
+#[derive(Debug, Clone)]
+pub enum AggregateFunc {
+    CountStar,
+    Count(Expression),
+    Sum(Expression),
+    Avg(Expression),
+    Min(Expression),
+    Max(Expression),
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +105,7 @@ pub struct ColumnDef {
 pub enum DataType {
     Integer,
     Text,
+    Blob,
 }
 
 #[derive(Debug, Clone)]

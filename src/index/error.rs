@@ -10,6 +10,12 @@ pub enum IndexError {
     #[error("Duplicate key")]
     DuplicateKey,
 
+    #[error("Invalid key: {0}")]
+    InvalidKey(String),
+
+    #[error("Page full")]
+    PageFull,
+
     #[error("Index corruption: {0}")]
     Corruption(String),
 

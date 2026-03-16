@@ -14,7 +14,17 @@ path = "src/lib.rs"
 [dependencies]
 thiserror = "1.0"
 anyhow = "1.0"
+hex = "0.4"
+rustyline = "14.0"
 
 [dev-dependencies]
 tempfile = "3.0"
 criterion = "0.5"
+
+[[bench]]
+name = "sqlite_comparison"
+harness = false
+
+[[bench]]
+name = "sqllite_rust_bench"
+harness = false
