@@ -9,3 +9,4 @@ pub mod optimizer;
 pub mod concurrency;
 pub mod columnar;
 pub mod jit;
+pub mod gpu;
