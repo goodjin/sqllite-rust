@@ -7,3 +7,4 @@ pub mod index;
 pub mod executor;
 pub mod optimizer;
 pub mod concurrency;
+pub mod columnar;
