@@ -6,3 +6,4 @@ pub mod transaction;
 pub mod index;
 pub mod executor;
 pub mod optimizer;
+pub mod concurrency;
