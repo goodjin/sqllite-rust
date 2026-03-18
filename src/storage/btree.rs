@@ -23,10 +23,11 @@ impl BPlusTreeIndex {
 
     /// 插入索引项
     pub fn insert(&mut self, key: Value, rowid: u64) -> Result<()> {
-        self.data
-            .entry(key)
-            .or_default()
-            .push(rowid);
+        let rowids = self.data.entry(key).or_default();
+        // 避免重复插入相同的rowid
+        if !rowids.contains(&rowid) {
+            rowids.push(rowid);
+        }
         Ok(())
     }
 

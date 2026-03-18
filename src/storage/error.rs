@@ -27,4 +27,10 @@ pub enum StorageError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Page is full")]
+    PageFull,
+
+    #[error("Corrupted data: {0}")]
+    Corrupted(String),
 }

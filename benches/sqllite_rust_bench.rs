@@ -32,12 +32,13 @@ fn execute_query(executor: &mut Executor, sql: &str) -> usize {
 }
 
 // ==================== 测试方案 1: 单条插入 ====================
+// 对应 SQLite: 100 和 1000 条记录
 fn bench_single_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("sqllite_single_insert");
     group.measurement_time(Duration::from_secs(10));
-    group.sample_size(50);
+    group.sample_size(10);
 
-    for row_count in [5, 10].iter() {
+    for row_count in [100, 1000].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(row_count),
             row_count,
@@ -65,12 +66,13 @@ fn bench_single_insert(c: &mut Criterion) {
 }
 
 // ==================== 测试方案 2: 批量插入 ====================
+// 对应 SQLite: 1000 和 10000 条记录
 fn bench_batch_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("sqllite_batch_insert");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(10);
 
-    for batch_size in [5, 10].iter() {
+    for batch_size in [1000, 10000].iter() {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             batch_size,
@@ -98,12 +100,13 @@ fn bench_batch_insert(c: &mut Criterion) {
 }
 
 // ==================== 测试方案 3: 简单查询 ====================
+// 对应 SQLite: 10000 条记录的 WHERE 查询
 fn bench_simple_select(c: &mut Criterion) {
     let mut group = c.benchmark_group("sqllite_simple_select");
     group.measurement_time(Duration::from_secs(10));
-    group.sample_size(30);
+    group.sample_size(20);
 
-    for table_size in [5, 10].iter() {
+    for table_size in [10000].iter() {
         // 准备数据（不计入基准时间）
         let (_temp, db_path) = temp_db_path();
         {
@@ -133,11 +136,13 @@ fn bench_simple_select(c: &mut Criterion) {
 }
 
 // ==================== 测试方案 4: 全表扫描 ====================
+// 对应 SQLite: 10000 条记录的全表扫描
 fn bench_full_table_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("sqllite_full_scan");
     group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
 
-    for table_size in [5, 10].iter() {
+    for table_size in [10000].iter() {
         // 准备数据
         let (_temp, db_path) = temp_db_path();
         {

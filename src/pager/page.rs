@@ -16,6 +16,17 @@ impl Page {
         }
     }
 
+    pub fn from_bytes(id: PageId, bytes: Vec<u8>) -> Self {
+        let mut data = [0u8; PAGE_SIZE];
+        let len = bytes.len().min(PAGE_SIZE);
+        data[..len].copy_from_slice(&bytes[..len]);
+        Self { id, data }
+    }
+
+    pub fn id(&self) -> PageId {
+        self.id
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }

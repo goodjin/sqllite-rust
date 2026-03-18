@@ -16,6 +16,16 @@ pub enum PagerError {
 
     #[error("Cache full")]
     CacheFull,
+
+    #[error("WAL error: {0}")]
+    WalError(String),
+}
+
+impl From<crate::storage::StorageError> for PagerError {
+    fn from(err: crate::storage::StorageError) -> Self {
+        // Convert StorageError to PagerError without causing cycles
+        PagerError::WalError(err.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, PagerError>;

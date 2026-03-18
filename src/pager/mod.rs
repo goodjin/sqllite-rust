@@ -9,7 +9,9 @@ use std::path::Path;
 
 use crate::pager::cache::PageCache;
 use crate::pager::header::DatabaseHeader;
-use crate::pager::page::{Page, PAGE_SIZE};
+pub use crate::pager::page::Page;
+use crate::pager::page::PAGE_SIZE;
+use crate::storage::wal::Wal;
 
 pub use crate::pager::error::{PagerError, Result};
 pub use crate::pager::page::PageId;
@@ -18,14 +20,16 @@ pub struct Pager {
     file: File,
     cache: PageCache,
     header: DatabaseHeader,
+    wal: Option<Wal>,
+    path: String,
 }
 
 impl Pager {
     pub fn open(path: &str) -> Result<Self> {
-        let path = Path::new(path);
-        let file_exists = path.exists();
+        let path_obj = Path::new(path);
+        let file_exists = path_obj.exists();
         let file_size = if file_exists {
-            std::fs::metadata(path)?.len()
+            std::fs::metadata(path_obj)?.len()
         } else {
             0
         };
@@ -35,7 +39,7 @@ impl Pager {
             .read(true)
             .write(true)
             .create(true)
-            .open(path)?;
+            .open(path_obj)?;
 
         let header = if is_new {
             let header = DatabaseHeader::new(PAGE_SIZE as u16);
@@ -48,18 +52,34 @@ impl Pager {
             DatabaseHeader::from_bytes(&header_bytes)?
         };
 
+        // Open WAL for this database
+        let wal = Wal::open(path, PAGE_SIZE).ok();
+
         Ok(Self {
             file,
             cache: PageCache::new(1000),
             header,
+            wal,
+            path: path.to_string(),
         })
     }
 
     pub fn get_page(&mut self, page_id: PageId) -> Result<Page> {
+        // Check cache first
         if let Some(page) = self.cache.get(page_id) {
             return Ok(page.clone());
         }
 
+        // Check WAL for uncheckpointed pages
+        if let Some(ref mut wal) = self.wal {
+            if let Some(data) = wal.read_page(page_id)? {
+                let page = Page::from_bytes(page_id, data);
+                self.cache.put(page.clone(), false);
+                return Ok(page);
+            }
+        }
+
+        // Read from data file
         let page = self.read_page_from_file(page_id)?;
         self.cache.put(page.clone(), false);
 
@@ -67,6 +87,11 @@ impl Pager {
     }
 
     pub fn write_page(&mut self, page: &Page) -> Result<()> {
+        // Write to WAL first (for durability)
+        if let Some(ref mut wal) = self.wal {
+            wal.write_page(page)?;
+        }
+        // Also update cache
         self.cache.put(page.clone(), true);
         Ok(())
     }
@@ -82,19 +107,59 @@ impl Pager {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        let dirty_pages: Vec<PageId> = self.cache.get_dirty_pages();
+        // Flush WAL first (this batches all writes into single fsync)
+        if let Some(ref mut wal) = self.wal {
+            wal.flush()?;
+        }
 
-        for page_id in dirty_pages {
-            if let Some(page) = self.cache.get(page_id) {
-                let page = page.clone();
-                self.write_page_to_file(&page)?;
-                self.cache.clear_dirty(page_id);
+        // Periodically checkpoint WAL to data file
+        if let Some(ref mut wal) = self.wal {
+            if wal.needs_checkpoint() {
+                self.checkpoint()?;
             }
         }
 
+        // Write header directly for metadata updates
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&self.header.to_bytes())?;
         self.file.sync_all()?;
+
+        Ok(())
+    }
+
+    /// Checkpoint WAL: flush accumulated changes to data file
+    pub fn checkpoint(&mut self) -> Result<()> {
+        // Take wal out temporarily to avoid borrow checker issues
+        let mut wal = match self.wal.take() {
+            Some(wal) => wal,
+            None => return Ok(()),
+        };
+
+        let file = &mut self.file;
+        let result = wal.checkpoint(|page_id, data| {
+            let offset = if page_id == 0 {
+                0
+            } else {
+                DatabaseHeader::SIZE as u64 + (page_id as u64 - 1) * PAGE_SIZE as u64
+            };
+            file.seek(SeekFrom::Start(offset))?;
+            if page_id == 0 {
+                file.write_all(&data[..DatabaseHeader::SIZE])?;
+            } else {
+                file.write_all(data)?;
+            }
+            Ok(())
+        });
+
+        let checkpointed = result?;
+
+        if checkpointed > 0 {
+            // Sync data file after checkpoint
+            self.file.sync_all()?;
+        }
+
+        // Put wal back
+        self.wal = Some(wal);
 
         Ok(())
     }

@@ -1,9 +1,11 @@
-use crate::sql::ast::{Statement, Expression, BinaryOp, DataType, ColumnDef, SelectColumn, AggregateFunc, CreateIndexStmt};
-use crate::storage::{Database, Record, Value};
+use crate::sql::ast::{Statement, Expression, BinaryOp, ColumnDef, SelectColumn, AggregateFunc, CreateIndexStmt};
+use crate::storage::{BtreeDatabase, Record, Value};
 
 pub mod result;
+pub mod planner;
 
 pub use result::{ExecutorError, Result};
+pub use planner::{QueryPlanner, QueryPlan, PlanExecutor};
 
 /// 事务日志条目
 #[derive(Debug, Clone)]
@@ -15,7 +17,7 @@ enum TransactionLogEntry {
 
 /// SQL执行引擎
 pub struct Executor {
-    db: Database,
+    db: BtreeDatabase,
     in_transaction: bool,
     transaction_log: Vec<TransactionLogEntry>,
 }
@@ -23,7 +25,7 @@ pub struct Executor {
 impl Executor {
     /// 打开或创建数据库
     pub fn open(path: &str) -> Result<Self> {
-        let db = Database::open(path)?;
+        let db = BtreeDatabase::open(path)?;
         Ok(Self {
             db,
             in_transaction: false,
@@ -114,14 +116,39 @@ impl Executor {
 
     /// 执行CREATE INDEX
     fn execute_create_index(&mut self, stmt: &CreateIndexStmt) -> Result<ExecuteResult> {
+        // 1. 创建索引结构
         self.db.create_index(
             stmt.index_name.clone(),
             stmt.table.clone(),
             stmt.column.clone(),
         )?;
+
+        // 2. 回填现有数据到索引
+        // 获取表的列定义，找到索引列的位置
+        let column_idx = self.db.get_table(&stmt.table)
+            .ok_or(ExecutorError::TableNotFound(stmt.table.clone()))?
+            .column_index(&stmt.column)
+            .ok_or(ExecutorError::ColumnNotFound(stmt.column.clone()))?;
+
+        // 获取表中所有记录（包括rowid）
+        let records_with_rowid = self.db.select_all_with_rowid(&stmt.table)?;
+
+        // 获取索引的可变引用
+        let index = self.db.get_index_mut(&stmt.index_name)
+            .ok_or(ExecutorError::IndexNotFound(stmt.index_name.clone()))?;
+
+        // 将每条记录插入索引
+        let mut indexed_count = 0;
+        for (rowid, record) in records_with_rowid {
+            if let Some(value) = record.values.get(column_idx) {
+                index.insert(value.clone(), rowid)?;
+                indexed_count += 1;
+            }
+        }
+
         Ok(ExecuteResult::Success(format!(
-            "Index '{}' created on {}({})",
-            stmt.index_name, stmt.table, stmt.column
+            "Index '{}' created on {}({}), indexed {} rows",
+            stmt.index_name, stmt.table, stmt.column, indexed_count
         )))
     }
 
@@ -134,6 +161,15 @@ impl Executor {
         let table_columns = table.columns.clone();
         let table_name = stmt.table.clone();
 
+        // 获取表的所有索引信息 (索引名, 列索引位置)
+        let index_info: Vec<(String, usize)> = self.db.get_table_indexes(&table_name)
+            .iter()
+            .filter_map(|idx| {
+                let col_idx = table_columns.iter().position(|c| c.name == idx.column)?;
+                Some((idx.name.clone(), col_idx))
+            })
+            .collect();
+
         let mut inserted_count = 0;
         let mut inserted_rowids: Vec<u64> = Vec::new();
 
@@ -142,9 +178,27 @@ impl Executor {
             // 构建记录
             let record = self.build_record(&table_columns, &stmt.columns, row_values)?;
 
+            // 提取索引列的值 (在record被消耗之前)
+            let index_values: Vec<(String, usize, Value)> = index_info
+                .iter()
+                .filter_map(|(idx_name, col_idx)| {
+                    record.values.get(*col_idx)
+                        .map(|v| (idx_name.clone(), *col_idx, v.clone()))
+                })
+                .collect();
+
             // 插入记录
             let rowid = self.db.insert(&table_name, record)?;
             inserted_count += 1;
+
+            // 更新所有索引
+            for (idx_name, _col_idx, value) in index_values {
+                if let Some(index) = self.db.get_index_mut(&idx_name) {
+                    if let Err(e) = index.insert(value, rowid) {
+                        eprintln!("Warning: failed to update index {}: {:?}", idx_name, e);
+                    }
+                }
+            }
 
             // 如果在事务中，记录到日志
             if self.in_transaction {
@@ -208,9 +262,9 @@ impl Executor {
         Ok(Record::new(record_values))
     }
 
-    /// 执行SELECT
+    /// 执行SELECT with query planning optimization
     fn execute_select(&mut self, stmt: &crate::sql::ast::SelectStmt) -> Result<ExecuteResult> {
-        // 处理JOIN查询
+        // 处理JOIN查询 (使用原始方法)
         if !stmt.joins.is_empty() {
             return self.execute_join_select(stmt);
         }
@@ -222,25 +276,29 @@ impl Executor {
             table.columns.clone()
         };
 
-        // 获取所有记录
-        let all_records = self.db.select_all(&stmt.from)?;
+        // Use query planner for optimized execution
+        let mut filtered_records: Vec<Record> = match QueryPlanner::plan(&self.db, stmt) {
+            Ok(QueryPlan::FullTableScan { .. }) | Err(_) => {
+                // Use full scan for complex queries or if planning fails
+                self.execute_full_scan(stmt, &table_columns)?
+            }
+            Ok(plan) => {
+                // Execute optimized plan
+                let table_columns = {
+                    let table = self.db.get_table(&stmt.from)
+                        .ok_or(ExecutorError::TableNotFound(stmt.from.clone()))?;
+                    table.columns.clone()
+                };
+                PlanExecutor::execute(&mut self.db, &plan, &table_columns)?
+            }
+        };
 
-        // 应用WHERE过滤
-        let mut filtered_records: Vec<Record> = all_records.into_iter()
-            .filter(|record| {
-                if let Some(ref where_clause) = stmt.where_clause {
-                    self.evaluate_where(record, &table_columns, where_clause).unwrap_or(false)
-                } else {
-                    true
-                }
-            })
-            .collect();
-
-        // 检查是否包含聚合函数或GROUP BY
+        // Check if we have aggregates or GROUP BY
         let has_aggregate = stmt.columns.iter().any(|c| {
             matches!(c, SelectColumn::Aggregate(_))
         });
 
+        // Process GROUP BY and aggregates if needed
         if !stmt.group_by.is_empty() || has_aggregate {
             // 处理GROUP BY和聚合
             let grouped_records = if stmt.group_by.is_empty() {
@@ -358,6 +416,30 @@ impl Executor {
         };
 
         Ok(ExecuteResult::Query(result))
+    }
+
+    /// Execute full table scan (fallback for complex queries)
+    fn execute_full_scan(
+        &mut self,
+        stmt: &crate::sql::ast::SelectStmt,
+        table_columns: &[ColumnDef],
+    ) -> Result<Vec<Record>> {
+        let all_records = self.db.select_all(&stmt.from)?;
+
+        // Apply WHERE filtering
+        let filtered: Vec<Record> = all_records
+            .into_iter()
+            .filter(|record| {
+                if let Some(ref where_clause) = stmt.where_clause {
+                    self.evaluate_where(record, table_columns, where_clause)
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        Ok(filtered)
     }
 
     /// 执行JOIN查询
