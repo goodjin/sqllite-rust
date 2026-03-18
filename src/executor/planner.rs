@@ -161,8 +161,13 @@ impl QueryPlanner {
 
     /// Extract range condition: column >/</>=/<= value or BETWEEN
     pub fn extract_range_condition(expr: &Expression) -> Option<(String, Option<Value>, Option<Value>)> {
+        // First try to extract from AND expression (e.g., rowid > 400 AND rowid < 410)
+        if let Some(result) = Self::extract_and_range_condition(expr) {
+            return Some(result);
+        }
+
+        // Fall back to single condition (e.g., rowid > 400)
         match expr {
-            // column > value or column >= value
             Expression::Binary { left, op, right } => {
                 if let Expression::Column(col) = left.as_ref() {
                     if let Some(val) = Self::expression_to_value(right) {
@@ -171,6 +176,54 @@ impl QueryPlanner {
                             BinaryOp::GreaterEqual => return Some((col.clone(), Some(val), None)),
                             BinaryOp::Less => return Some((col.clone(), None, Some(val))),
                             BinaryOp::LessEqual => return Some((col.clone(), None, Some(val))),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Extract range condition from AND expression: col > X AND col < Y
+    fn extract_and_range_condition(expr: &Expression) -> Option<(String, Option<Value>, Option<Value>)> {
+        match expr {
+            Expression::Binary { left, op: BinaryOp::And, right } => {
+                // Try to extract conditions from left and right sides
+                let left_cond = Self::extract_single_condition(left);
+                let right_cond = Self::extract_single_condition(right);
+
+                // If both conditions are on the same column, combine them
+                if let (Some((col1, start1, end1)), Some((col2, start2, end2))) = (&left_cond, &right_cond) {
+                    if col1 == col2 {
+                        // Combine the range
+                        let start = start1.clone().or_else(|| start2.clone());
+                        let end = end1.clone().or_else(|| end2.clone());
+                        return Some((col1.clone(), start, end));
+                    }
+                }
+
+                // If only one side has a condition, return it
+                left_cond.or(right_cond)
+            }
+            _ => None
+        }
+    }
+
+    /// Extract a single comparison condition
+    fn extract_single_condition(expr: &Expression) -> Option<(String, Option<Value>, Option<Value>)> {
+        match expr {
+            Expression::Binary { left, op, right } => {
+                if let Expression::Column(col) = left.as_ref() {
+                    if let Some(val) = Self::expression_to_value(right) {
+                        match op {
+                            BinaryOp::Greater | BinaryOp::GreaterEqual => {
+                                return Some((col.clone(), Some(val), None))
+                            }
+                            BinaryOp::Less | BinaryOp::LessEqual => {
+                                return Some((col.clone(), None, Some(val)))
+                            }
                             _ => {}
                         }
                     }
