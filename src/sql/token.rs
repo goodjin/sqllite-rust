@@ -20,5 +20,6 @@ pub enum Token {
     LessEqual, GreaterEqual,
     Plus, Minus, Star, Slash,
     Semicolon, Comma, LParen, RParen,
+    QuestionMark,  // 占位符 `?`
     Eof,
 }

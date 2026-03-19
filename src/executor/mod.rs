@@ -1,8 +1,10 @@
 use crate::sql::ast::{Statement, Expression, BinaryOp, ColumnDef, SelectColumn, AggregateFunc, CreateIndexStmt};
+use crate::sql::StatementCache;
 use crate::storage::{BtreeDatabase, Record, Value};
 
 pub mod result;
 pub mod planner;
+pub mod pool;
 
 pub use result::{ExecutorError, Result};
 pub use planner::{QueryPlanner, QueryPlan, PlanExecutor};
@@ -20,6 +22,16 @@ pub struct Executor {
     db: BtreeDatabase,
     in_transaction: bool,
     transaction_log: Vec<TransactionLogEntry>,
+    /// 预编译语句缓存
+    statement_cache: StatementCache,
+    /// 查询计划器（用于优化查询）
+    query_planner: QueryPlanner,
+    /// 自动批量模式
+    auto_batch: bool,
+    /// 批量大小（达到此数量自动提交）
+    batch_size: usize,
+    /// 当前批量中的操作数
+    batch_count: usize,
 }
 
 impl Executor {
@@ -30,12 +42,43 @@ impl Executor {
             db,
             in_transaction: false,
             transaction_log: Vec::new(),
+            statement_cache: StatementCache::new(100), // 缓存 100 个预编译语句
+            query_planner: QueryPlanner,
+            auto_batch: false,
+            batch_size: 100,
+            batch_count: 0,
         })
+    }
+
+    /// 启用自动批量模式
+    ///
+    /// 启用后，每次操作会自动开始事务，
+    /// 达到 `batch_size` 条后自动提交
+    pub fn enable_auto_batch(&mut self, batch_size: usize) {
+        self.auto_batch = true;
+        self.batch_size = batch_size;
+        self.batch_count = 0;
+    }
+
+    /// 禁用自动批量模式
+    pub fn disable_auto_batch(&mut self) {
+        self.auto_batch = false;
+    }
+
+    /// 手动刷新批量（立即提交当前批次）
+    pub fn flush_batch(&mut self) -> Result<ExecuteResult> {
+        if self.batch_count > 0 {
+            self.execute_commit()?;
+        }
+        Ok(ExecuteResult::Success("Batch flushed".to_string()))
     }
 
     /// 执行SQL语句
     pub fn execute(&mut self, stmt: &Statement) -> Result<ExecuteResult> {
-        match stmt {
+        // 自动批量模式处理
+        self.maybe_start_auto_batch()?;
+
+        let result = match stmt {
             Statement::BeginTransaction => self.execute_begin(),
             Statement::Commit => self.execute_commit(),
             Statement::Rollback => self.execute_rollback(),
@@ -47,7 +90,97 @@ impl Executor {
             Statement::DropTable(dt) => self.execute_drop_table(dt),
             Statement::CreateIndex(ci) => self.execute_create_index(ci),
             _ => Err(ExecutorError::NotImplemented(format!("{:?}", stmt))),
+        };
+
+        // 自动批量提交
+        if let Ok(_) = result {
+            self.maybe_auto_commit()?;
         }
+
+        result
+    }
+
+    /// 如果在自动批量模式且不在事务中，开始新事务
+    fn maybe_start_auto_batch(&mut self) -> Result<()> {
+        if self.auto_batch && !self.in_transaction {
+            // SELECT 等读操作不需要开启事务
+            // 只需要在写操作时自动开启
+        }
+        Ok(())
+    }
+
+    /// 检查是否需要自动提交
+    fn maybe_auto_commit(&mut self) -> Result<()> {
+        if !self.auto_batch {
+            return Ok(());
+        }
+
+        // 只对写操作计数
+        self.batch_count += 1;
+
+        if self.batch_count >= self.batch_size {
+            // 达到批量大小，自动提交
+            if self.in_transaction {
+                self.execute_commit()?;
+            }
+            self.batch_count = 0;
+        }
+
+        Ok(())
+    }
+
+    /// 执行SQL字符串（使用预编译语句缓存）
+    ///
+    /// 这是推荐使用的方式，内部会：
+    /// 1. 尝试从缓存获取预编译语句
+    /// 2. 如果未命中，解析 SQL 并缓存
+    /// 3. 执行预编译语句
+    pub fn execute_sql(&mut self, sql: &str) -> Result<ExecuteResult> {
+        // 从缓存获取或创建预编译语句
+        let prepared = self.statement_cache.get_or_prepare(sql)
+            .map_err(|e| ExecutorError::ParseError(e))?;
+
+        // 执行预编译语句
+        self.execute(&prepared.statement)
+    }
+
+    /// 执行预编译语句（带参数绑定）
+    ///
+    /// 使用方式：
+    /// ```ignore
+    /// // 第一次：解析并缓存模板
+    /// executor.execute_prepared(
+    ///     "INSERT INTO users (name) VALUES (?)",
+    ///     &[Expression::String("Alice".into())]
+    /// )?;
+    ///
+    /// // 后续执行：直接使用缓存的参数化查询
+    /// executor.execute_prepared(
+    ///     "INSERT INTO users (name) VALUES (?)",
+    ///     &[Expression::String("Bob".into())]
+    /// )?;
+    /// ```
+    pub fn execute_prepared(&mut self, sql: &str, params: &[crate::sql::Expression]) -> Result<ExecuteResult> {
+        // 从缓存获取或创建预编译语句
+        let prepared = self.statement_cache.get_or_prepare(sql)
+            .map_err(|e| ExecutorError::ParseError(e))?;
+
+        // 绑定参数
+        let bound_stmt = crate::sql::bind_params(&prepared, params)
+            .map_err(|e| ExecutorError::ParseError(e))?;
+
+        // 执行带参数的语句
+        self.execute(&bound_stmt)
+    }
+
+    /// 获取语句缓存统计信息
+    pub fn cache_stats(&self) -> crate::sql::CacheStats {
+        self.statement_cache.stats()
+    }
+
+    /// 清除语句缓存
+    pub fn clear_cache(&mut self) {
+        self.statement_cache.clear();
     }
 
     /// 执行BEGIN TRANSACTION
@@ -964,6 +1097,7 @@ impl Executor {
             Expression::Boolean(b) => Ok(Value::Integer(if *b { 1 } else { 0 })),
             Expression::Null => Ok(Value::Null),
             Expression::Column(_) => Err(ExecutorError::NotImplemented("Column reference in value".to_string())),
+            Expression::Placeholder(_) => Err(ExecutorError::NotImplemented("Unbound placeholder - use execute_prepared with parameters".to_string())),
             Expression::Binary { .. } => Err(ExecutorError::NotImplemented("Binary expression in value".to_string())),
         }
     }

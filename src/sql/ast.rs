@@ -130,6 +130,8 @@ pub enum Expression {
     Boolean(bool),
     Null,
     Column(String),
+    /// 参数占位符，如 `?` 或 `$1`
+    Placeholder(usize),
     Binary {
         left: Box<Expression>,
         op: BinaryOp,

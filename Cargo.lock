@@ -706,6 +706,7 @@ dependencies = [
  "criterion",
  "hashlink",
  "hex",
+ "regex",
  "rustyline",
  "tempfile",
  "thiserror",

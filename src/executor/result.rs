@@ -11,6 +11,7 @@ pub enum ExecutorError {
     ValueCountMismatch { expected: usize, actual: usize },
     NotImplemented(String),
     InvalidOperation(String),
+    ParseError(String),
 }
 
 impl std::fmt::Display for ExecutorError {
@@ -23,6 +24,7 @@ impl std::fmt::Display for ExecutorError {
             ExecutorError::ValueCountMismatch { expected, actual } => write!(f, "Value count mismatch: expected {}, got {}", expected, actual),
             ExecutorError::NotImplemented(feature) => write!(f, "Not implemented: {}", feature),
             ExecutorError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
+            ExecutorError::ParseError(msg) => write!(f, "Parse error: {}", msg),
         }
     }
 }

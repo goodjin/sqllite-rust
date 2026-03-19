@@ -481,6 +481,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expression::Null)
             }
+            Token::QuestionMark => {
+                // 占位符 `?` - 使用位置索引（从 1 开始）
+                self.advance();
+                // 这里简化处理，实际应该跟踪当前语句中的占位符位置
+                Ok(Expression::Placeholder(1))
+            }
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();

@@ -24,6 +24,7 @@ impl<'a> Tokenizer<'a> {
             ',' => { self.advance(); Token::Comma }
             '(' => { self.advance(); Token::LParen }
             ')' => { self.advance(); Token::RParen }
+            '?' => { self.advance(); Token::QuestionMark }  // 占位符
             '*' => { self.advance(); Token::Star }
             '+' => { self.advance(); Token::Plus }
             '-' => { self.advance(); Token::Minus }
