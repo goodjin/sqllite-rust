@@ -33,4 +33,6 @@ pub enum StorageError {
 
     #[error("Corrupted data: {0}")]
     Corrupted(String),
+    #[error("Internal error: {0}")]
+    Other(String),
 }

@@ -2,7 +2,7 @@
 //!
 //! 列式存储格式，优化 OLAP 工作负载
 
-use crate::storage::Value;
+// use crate::storage::Value;
 
 /// 编码类型
 #[derive(Clone, Debug, PartialEq)]

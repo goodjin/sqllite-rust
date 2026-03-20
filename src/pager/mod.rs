@@ -21,7 +21,7 @@ pub struct Pager {
     cache: PageCache,
     header: DatabaseHeader,
     wal: Option<Wal>,
-    path: String,
+    _path: String,
 }
 
 impl Pager {
@@ -185,7 +185,7 @@ impl Pager {
         Ok(page)
     }
 
-    fn write_page_to_file(&mut self, page: &Page) -> Result<()> {
+    fn _write_page_to_file(&mut self, page: &Page) -> Result<()> {
         if page.id == 0 {
             // Page 0 contains the database header
             self.file.seek(SeekFrom::Start(0))?;

@@ -10,7 +10,7 @@ use crate::pager::{PageId, Pager};
 use crate::pager::page::Page;
 use crate::storage::{Result, StorageError};
 use crate::storage::btree_engine::{
-    PageHeader, PageType, BtreePageOps, BtreeNode, IndexEntry, LeafEntry,
+    PageHeader, PageType, BtreePageOps,
     compare_keys, MAX_INLINE_SIZE, MIN_RECORDS_FOR_MERGE,
 };
 use std::cmp::Ordering;
@@ -188,7 +188,7 @@ impl BtreeStorage {
         let mut leaf_page = pager.get_page(leaf_page_id)?;
 
         // Check if key already exists (and not deleted)
-        if let Some((slot_idx, is_deleted)) = self.find_key_slot_with_status(&leaf_page, key)? {
+        if let Some((_slot_idx, is_deleted)) = self.find_key_slot_with_status(&leaf_page, key)? {
             if !is_deleted {
                 return Err(StorageError::DuplicateKey);
             }
@@ -375,7 +375,7 @@ impl BtreeStorage {
         let mut new_page = Page::new(new_page_id);
 
         // Initialize as internal node
-        let mut new_header = PageHeader::new(PageType::Index);
+        let new_header = PageHeader::new(PageType::Index);
         new_page.write_header(&new_header)?;
 
         // Find median (don't include median in either child)
@@ -527,8 +527,12 @@ impl BtreeStorage {
                 page.as_slice()[slot_offset + 1]
             ]) as usize;
 
-            // Read record header to get key size
+            // Read record header to get key size and deleted status
             let rec_header = RecordHeader::from_bytes(&page.as_slice()[record_offset..])?;
+
+            if rec_header.is_deleted() {
+                continue;
+            }
 
             // Read the key
             let key_start = record_offset + RecordHeader::SIZE;
@@ -571,7 +575,34 @@ impl BtreeStorage {
             let record_key = &page.as_slice()[key_start..key_end];
 
             if compare_keys(record_key, key) == Ordering::Equal {
-                return Ok(Some((slot_idx, rec_header.is_deleted())));
+                // Return the first match, but continue if we find an active one later?
+                // Actually, if we have both, we should probably prefer the active one.
+                if !rec_header.is_deleted() {
+                    return Ok(Some((slot_idx, false)));
+                } else {
+                    // It's deleted, but keep looking for an active one
+                    if slot_idx == record_count - 1 || compare_keys(record_key, key) == Ordering::Equal {
+                         // This is tricky. In a sorted array, all same keys are together.
+                         // But we might have [Deleted A, Active A].
+                         // Let's just return the first active one we find.
+                    }
+                }
+            }
+        }
+
+        // Second pass: if no active one found, return the first deleted one found
+        for slot_idx in 0..record_count {
+            let slot_offset = PageHeader::SIZE + slot_idx * 2;
+            let record_offset = u16::from_le_bytes([
+                page.as_slice()[slot_offset],
+                page.as_slice()[slot_offset + 1]
+            ]) as usize;
+            let rec_header = RecordHeader::from_bytes(&page.as_slice()[record_offset..])?;
+            let key_start = record_offset + RecordHeader::SIZE;
+            let key_end = key_start + rec_header.key_size as usize;
+            let record_key = &page.as_slice()[key_start..key_end];
+            if compare_keys(record_key, key) == Ordering::Equal && rec_header.is_deleted() {
+                return Ok(Some((slot_idx, true)));
             }
         }
 

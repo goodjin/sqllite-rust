@@ -48,6 +48,7 @@ pub struct OrderBy {
 pub enum SelectColumn {
     All,
     Column(String),
+    Expression(Expression, Option<String>),
     Aggregate(AggregateFunc),
 }
 
@@ -106,6 +107,7 @@ pub enum DataType {
     Integer,
     Text,
     Blob,
+    Vector(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -114,12 +116,19 @@ pub struct DropTableStmt {
     pub if_exists: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexType {
+    BTree,
+    HNSW,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateIndexStmt {
     pub index_name: String,
     pub table: String,
     pub column: String,
     pub unique: bool,
+    pub index_type: IndexType,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +145,11 @@ pub enum Expression {
         left: Box<Expression>,
         op: BinaryOp,
         right: Box<Expression>,
+    },
+    Vector(Vec<Expression>),
+    FunctionCall {
+        name: String,
+        args: Vec<Expression>,
     },
 }
 

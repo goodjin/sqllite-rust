@@ -185,19 +185,21 @@ impl<'a> Parser<'a> {
                         SelectColumn::Aggregate(AggregateFunc::Max(expr))
                     }
                     _ => {
-                        // Regular column or expression
-                        if let Token::Identifier(col) = &self.current {
-                            let col = col.clone();
-                            self.advance();
-                            SelectColumn::Column(col)
-                        } else {
-                            // Try to parse as expression
-                            let expr = self.parse_expression()?;
-                            // For now, only support column expressions in non-aggregate context
-                            // This is a simplification - in a full implementation we'd handle
-                            // arbitrary expressions here
-                            return Err(ParseError::UnexpectedToken(format!("{:?}", self.current)));
+                        let expr = self.parse_expression()?;
+                        let mut alias = None;
+                        
+                        // Check for AS alias
+                        if let Token::Identifier(id) = &self.current {
+                            if id.to_uppercase() == "AS" {
+                                self.advance();
+                                if let Token::Identifier(alias_name) = &self.current {
+                                    alias = Some(alias_name.clone());
+                                    self.advance();
+                                }
+                            }
                         }
+                        
+                        SelectColumn::Expression(expr, alias)
                     }
                 };
 
@@ -309,10 +311,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_create(&mut self) -> Result<Statement> {
-        self.advance();
+        self.consume(Token::Create)?;
         match &self.current {
             Token::Table => self.parse_create_table(),
-            Token::Index => self.parse_create_index(),
+            Token::Index => self.parse_create_index(false),
+            Token::Unique => {
+                self.consume(Token::Unique)?;
+                self.parse_create_index(true)
+            }
             _ => Err(ParseError::UnexpectedToken(format!("{:?}", self.current))),
         }
     }
@@ -326,11 +332,18 @@ impl<'a> Parser<'a> {
         loop {
             let name = self.consume_identifier()?;
             let data_type = self.parse_data_type()?;
+            
+            let mut primary_key = false;
+            if self.match_token(Token::Primary) {
+                self.consume(Token::Key)?;
+                primary_key = true;
+            }
+
             columns.push(ColumnDef {
                 name,
                 data_type,
                 nullable: true,
-                primary_key: false,
+                primary_key,
             });
 
             if !self.match_token(Token::Comma) {
@@ -343,7 +356,7 @@ impl<'a> Parser<'a> {
         Ok(Statement::CreateTable(CreateTableStmt { table, columns }))
     }
 
-    fn parse_create_index(&mut self) -> Result<Statement> {
+    fn parse_create_index(&mut self, unique: bool) -> Result<Statement> {
         self.consume(Token::Index)?;
         let index_name = self.consume_identifier()?;
         self.consume(Token::On)?;
@@ -352,11 +365,20 @@ impl<'a> Parser<'a> {
         let column = self.consume_identifier()?;
         self.consume(Token::RParen)?;
 
+        let mut index_type = IndexType::BTree;
+        if self.match_token(Token::Using) {
+            let type_str = self.consume_identifier()?;
+            if type_str.to_uppercase() == "HNSW" {
+                index_type = IndexType::HNSW;
+            }
+        }
+
         Ok(Statement::CreateIndex(CreateIndexStmt {
             index_name,
             table,
             column,
-            unique: false,
+            unique,
+            index_type,
         }))
     }
 
@@ -443,7 +465,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expression> {
-        let mut left = self.parse_primary()?;
+        let mut left = self.parse_term()?;
 
         loop {
             let op = match &self.current {
@@ -451,6 +473,48 @@ impl<'a> Parser<'a> {
                 Token::Greater => BinaryOp::Greater,
                 Token::LessEqual => BinaryOp::LessEqual,
                 Token::GreaterEqual => BinaryOp::GreaterEqual,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_term()?;
+            left = Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_term(&mut self) -> Result<Expression> {
+        let mut left = self.parse_factor()?;
+
+        loop {
+            let op = match &self.current {
+                Token::Plus => BinaryOp::Add,
+                Token::Minus => BinaryOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_factor()?;
+            left = Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_factor(&mut self) -> Result<Expression> {
+        let mut left = self.parse_primary()?;
+
+        loop {
+            let op = match &self.current {
+                Token::Star => BinaryOp::Mul,
+                Token::Slash => BinaryOp::Div,
                 _ => break,
             };
             self.advance();
@@ -472,6 +536,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expression::Integer(n))
             }
+            Token::FloatLiteral(f) => {
+                let f = *f;
+                self.advance();
+                Ok(Expression::Float(f))
+            }
             Token::StringLiteral(s) => {
                 let s = s.clone();
                 self.advance();
@@ -490,13 +559,37 @@ impl<'a> Parser<'a> {
             Token::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                Ok(Expression::Column(name))
+                if self.match_token(Token::LParen) {
+                    let mut args = Vec::new();
+                    if self.current != Token::RParen {
+                        args.push(self.parse_expression()?);
+                        while self.match_token(Token::Comma) {
+                            args.push(self.parse_expression()?);
+                        }
+                    }
+                    self.consume(Token::RParen)?;
+                    Ok(Expression::FunctionCall { name, args })
+                } else {
+                    Ok(Expression::Column(name))
+                }
             }
             Token::LParen => {
                 self.advance();
                 let expr = self.parse_expression()?;
                 self.consume(Token::RParen)?;
                 Ok(expr)
+            }
+            Token::LBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                if self.current != Token::RBracket {
+                    elements.push(self.parse_expression()?);
+                    while self.match_token(Token::Comma) {
+                        elements.push(self.parse_expression()?);
+                    }
+                }
+                self.consume(Token::RBracket)?;
+                Ok(Expression::Vector(elements))
             }
             _ => Err(ParseError::UnexpectedToken(format!("{:?}", self.current))),
         }
@@ -515,6 +608,18 @@ impl<'a> Parser<'a> {
             Token::Blob => {
                 self.advance();
                 Ok(DataType::Blob)
+            }
+            Token::Vector => {
+                self.advance();
+                let mut dim = 0;
+                if self.match_token(Token::LParen) {
+                    if let Token::NumberLiteral(n) = self.current {
+                        dim = n as u32;
+                        self.advance();
+                    }
+                    self.consume(Token::RParen)?;
+                }
+                Ok(DataType::Vector(dim))
             }
             _ => Err(ParseError::UnexpectedToken(format!("{:?}", self.current))),
         }

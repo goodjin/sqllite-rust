@@ -5,7 +5,7 @@
 
 use crate::pager::{PageId, Pager};
 use crate::pager::page::{Page, PAGE_SIZE};
-use crate::storage::{Record, Result, StorageError, Value};
+use crate::storage::{Result, StorageError};
 use std::cmp::Ordering;
 
 // ============================================================================
@@ -483,6 +483,34 @@ impl BtreePageOps for Page {
             return Err(StorageError::PageFull);
         }
 
+        // Find insertion position to maintain key order
+        let mut insert_idx = 0;
+        while insert_idx < header.record_count as usize {
+            let slot_offset = PageHeader::SIZE + insert_idx * 2;
+            let record_offset = u16::from_le_bytes([
+                self.data[slot_offset],
+                self.data[slot_offset + 1]
+            ]) as usize;
+            
+            let rec_header = RecordHeader::from_bytes(&self.data[record_offset..])?;
+            let k_start = record_offset + RecordHeader::SIZE;
+            let k_end = k_start + rec_header.key_size as usize;
+            let k = &self.data[k_start..k_end];
+            
+            if compare_keys(key, k) == Ordering::Less {
+                break;
+            }
+            insert_idx += 1;
+        }
+
+        // Move existing slots to the right
+        if insert_idx < header.record_count as usize {
+            let src = PageHeader::SIZE + insert_idx * 2;
+            let dst = PageHeader::SIZE + (insert_idx + 1) * 2;
+            let len = (header.record_count as usize - insert_idx) * 2;
+            self.data.copy_within(src..src + len, dst);
+        }
+
         // Calculate record position (growing from end of page)
         let record_offset = (header.free_offset as usize + 1) - total_record_size;
 
@@ -496,8 +524,8 @@ impl BtreePageOps for Page {
         self.data[key_start..key_start + key_size].copy_from_slice(key);
         self.data[key_start + key_size..key_start + key_size + value_size].copy_from_slice(value);
 
-        // Update slot array
-        let slot_offset = PageHeader::SIZE + header.record_count as usize * 2;
+        // Update slot array at the correct position
+        let slot_offset = PageHeader::SIZE + insert_idx * 2;
         self.data[slot_offset..slot_offset + 2]
             .copy_from_slice(&(record_offset as u16).to_le_bytes());
 

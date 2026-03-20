@@ -1,5 +1,4 @@
 use std::env;
-use sqllite_rust::sql::Parser;
 use sqllite_rust::pager::Pager;
 use sqllite_rust::executor::{Executor, ExecuteResult};
 use rustyline::DefaultEditor;
@@ -53,12 +52,11 @@ fn print_help() {
 
 fn run_shell() {
     println!("SQLite Rust Clone {} - Interactive Shell", VERSION);
-    println!("Enter \".help\" for usage hints.");
-    println!("Enter \".quit\" to exit.\n");
+    println!("输入 \".help\" 获取帮助。");
+    println!("输入 \".quit\"、\".exit\" 或按 Ctrl+D 退出程序。\n");
 
-    // Open database with executor
-    let db_path = "/tmp/sqllite_shell.db";
-    let _ = std::fs::remove_file(db_path);
+    let db_path = "sqllite.db";
+    println!("Connected to {}", db_path);
 
     let mut executor = match Executor::open(db_path) {
         Ok(exec) => exec,
@@ -69,11 +67,11 @@ fn run_shell() {
     };
 
     let mut rl = DefaultEditor::new().expect("Failed to create editor");
-    let history_path = "/tmp/sqllite_history.txt";
+    let history_path = ".sqllite_history";
     let _ = rl.load_history(history_path);
 
     loop {
-        let readline = rl.readline("sqlite> ");
+        let readline = rl.readline("sqllite> ");
         match readline {
             Ok(line) => {
                 let input = line.trim();
@@ -84,7 +82,7 @@ fn run_shell() {
                 let _ = rl.add_history_entry(input);
 
                 if input.starts_with('.') {
-                    if handle_command(input, &executor) {
+                    if handle_command(input, &mut executor) {
                         break;
                     }
                 } else {
@@ -107,14 +105,16 @@ fn run_shell() {
     }
 
     let _ = rl.save_history(history_path);
-
-    // Cleanup
-    let _ = std::fs::remove_file(db_path);
     println!("Bye!");
 }
 
 // 返回 true 表示退出
-fn handle_command(cmd: &str, _executor: &Executor) -> bool {
+fn handle_command(cmd_line: &str, executor: &mut Executor) -> bool {
+    let parts: Vec<&str> = cmd_line.split_whitespace().collect();
+    if parts.is_empty() { return false; }
+    
+    let cmd = parts[0].trim_end_matches(';');
+    
     match cmd {
         ".quit" | ".exit" | ".q" => {
             return true;
@@ -124,33 +124,74 @@ fn handle_command(cmd: &str, _executor: &Executor) -> bool {
             println!(".tables     List all tables");
             println!(".schema     Show database schema");
             println!(".dbinfo     Show database info");
+            println!(".open PATH  Close current database and open PATH");
             println!(".help       Show this help message");
         }
         ".tables" => {
-            println!("-- Tables:");
-            println!("   (Use .schema to see table details)");
+            let tables = executor.list_tables();
+            if tables.is_empty() {
+                println!("No tables found.");
+            } else {
+                for table in tables {
+                    println!("{}", table);
+                }
+            }
         }
         ".schema" => {
-            println!("-- Schema:");
-            println!("   (Schema display not yet implemented)");
+            let table_name = if parts.len() > 1 { Some(parts[1]) } else { None };
+            let tables = if let Some(name) = table_name {
+                vec![name.to_string()]
+            } else {
+                executor.list_tables()
+            };
+            
+            if tables.is_empty() {
+                if table_name.is_some() {
+                    println!("Table not found: {}", table_name.unwrap());
+                } else {
+                    println!("No tables found.");
+                }
+            } else {
+                for table in tables {
+                    if let Some(schema) = executor.get_table_schema(&table) {
+                        println!("{};", schema);
+                    }
+                }
+            }
         }
         ".dbinfo" => {
-            match Pager::open("/tmp/sqllite_shell.db") {
+            // Re-open pager to get header info (since it's private in Executor)
+            // Note: This is a bit hacky but works for demo
+            match Pager::open("sqllite.db") {
                 Ok(pager) => {
                     let header = pager.header();
+                    println!("-- Database Info:");
                     let page_size = header.page_size;
                     let database_size = header.database_size;
-                    let file_format_write = header.file_format_write;
-                    let file_format_read = header.file_format_read;
                     let text_encoding = header.text_encoding;
-                    println!("-- Database Info:");
                     println!("   Page size: {} bytes", page_size);
                     println!("   Database size: {} pages", database_size);
-                    println!("   File format: {}.{}", file_format_write, file_format_read);
+                    println!("   File format: {}.{}", header.file_format_write, header.file_format_read);
                     println!("   Text encoding: {} (1=UTF-8)", text_encoding);
                 }
                 Err(e) => {
-                    eprintln!("Error opening database: {:?}", e);
+                    eprintln!("Error getting database info: {:?}", e);
+                }
+            }
+        }
+        ".open" => {
+            if parts.len() < 2 {
+                println!("Usage: .open PATH");
+            } else {
+                let path = parts[1];
+                match Executor::open(path) {
+                    Ok(new_executor) => {
+                        *executor = new_executor;
+                        println!("Opened database: {}", path);
+                    }
+                    Err(e) => {
+                        println!("Error opening database {}: {:?}", path, e);
+                    }
                 }
             }
         }
@@ -162,45 +203,34 @@ fn handle_command(cmd: &str, _executor: &Executor) -> bool {
     false
 }
 
-fn handle_sql(sql: &str, executor: &mut Executor) {
-    match Parser::new(sql) {
-        Ok(mut parser) => {
-            match parser.parse() {
-                Ok(stmt) => {
-                    match executor.execute(&stmt) {
-                        Ok(result) => {
-                            match result {
-                                ExecuteResult::Success(msg) => {
-                                    println!("{}", msg);
-                                }
-                                ExecuteResult::Query(query_result) => {
-                                    query_result.print();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Execution error: {:?}", e);
-                        }
+fn handle_sql(sql_line: &str, executor: &mut Executor) {
+    // Basic multi-statement support by splitting on semicolon
+    for sql in sql_line.split(';') {
+        let sql = sql.trim();
+        if sql.is_empty() { continue; }
+        
+        match executor.execute_sql(sql) {
+            Ok(result) => {
+                match result {
+                    ExecuteResult::Success(msg) => {
+                        println!("{}", msg);
+                    }
+                    ExecuteResult::Query(query_result) => {
+                        query_result.print();
                     }
                 }
-                Err(e) => {
-                    eprintln!("Parse error: {:?}", e);
-                }
             }
-        }
-        Err(e) => {
-            eprintln!("Tokenizer error: {:?}", e);
+            Err(e) => {
+                eprintln!("Error: {}", e);
+            }
         }
     }
 }
 
 fn run_demo() {
-    println!("SQLite Rust Clone - Demo\n");
+    println!("SQLite Rust Clone - Comprehensive Demo\n");
 
-    // Demo 1: SQL Parsing and Execution
-    println!("=== SQL Execution Demo ===");
-
-    let db_path = "/tmp/test_sqllite.db";
+    let db_path = "demo.db";
     let _ = std::fs::remove_file(db_path);
 
     let mut executor = match Executor::open(db_path) {
@@ -211,39 +241,45 @@ fn run_demo() {
         }
     };
 
-    let sql_statements = vec![
-        "CREATE TABLE users (id INTEGER, name TEXT)",
-        "INSERT INTO users VALUES (1, 'Alice')",
-        "INSERT INTO users VALUES (2, 'Bob')",
-        "SELECT * FROM users",
+    let test_cases = vec![
+        ("Create and describe table", vec![
+            "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, price INTEGER, category TEXT)",
+        ]),
+        ("Insert data", vec![
+            "INSERT INTO products VALUES (1, 'Laptop', 1200, 'Electronics')",
+            "INSERT INTO products VALUES (2, 'Smartphone', 800, 'Electronics')",
+            "INSERT INTO products VALUES (3, 'Coffee Maker', 100, 'Appliances')",
+            "INSERT INTO products VALUES (4, 'Headphones', 150, 'Electronics')",
+        ]),
+        ("Simple queries", vec![
+            "SELECT * FROM products",
+            "SELECT name, price FROM products WHERE price > 500",
+        ]),
+        ("Transactional updates", vec![
+            "BEGIN TRANSACTION",
+            "UPDATE products SET price = price + 50 WHERE category = 'Electronics'",
+            "SELECT * FROM products WHERE category = 'Electronics'",
+            "ROLLBACK",
+            "SELECT * FROM products WHERE category = 'Electronics'",
+        ]),
+        ("Cleanup", vec![
+            "DROP TABLE products",
+        ]),
     ];
 
-    for sql in sql_statements {
-        println!("> {}", sql);
-        match Parser::new(sql) {
-            Ok(mut parser) => {
-                match parser.parse() {
-                    Ok(stmt) => {
-                        match executor.execute(&stmt) {
-                            Ok(result) => {
-                                match result {
-                                    ExecuteResult::Success(msg) => {
-                                        println!("✓ {}", msg);
-                                    }
-                                    ExecuteResult::Query(query_result) => {
-                                        query_result.print();
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                println!("✗ Execution error: {:?}", e);
-                            }
-                        }
+    for (desc, sqls) in test_cases {
+        println!("\n=== {} ===", desc);
+        for sql in sqls {
+            println!("> {}", sql);
+            match executor.execute_sql(sql) {
+                Ok(result) => {
+                    match result {
+                        ExecuteResult::Success(msg) => println!("✓ {}", msg),
+                        ExecuteResult::Query(qr) => qr.print(),
                     }
-                    Err(e) => println!("✗ Parse error: {:?}", e),
                 }
+                Err(e) => println!("✗ Error: {}", e),
             }
-            Err(e) => println!("✗ Tokenizer error: {:?}", e),
         }
     }
 
@@ -252,11 +288,9 @@ fn run_demo() {
 
     println!("\n=== Demo Complete ===");
     println!("All core components are working:");
-    println!("  - SQL Tokenizer: Converts SQL text to tokens");
-    println!("  - SQL Parser: Builds AST from tokens");
-    println!("  - Executor: Executes SQL statements");
-    println!("  - Pager: Manages database pages with LRU cache");
-    println!("  - Storage: Record serialization/deserialization");
-    println!("\nRun with 'shell' command for interactive SQL shell:");
+    println!("  - Persistence: Data is stored in B+ Tree based pages");
+    println!("  - Transactions: ROLLBACK correctly restores previous state");
+    println!("  - Query Engine: Filters (WHERE) and complex statements supported");
+    println!("\nTry the interactive shell:");
     println!("  cargo run -- shell");
 }

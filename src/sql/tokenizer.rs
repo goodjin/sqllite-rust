@@ -24,6 +24,8 @@ impl<'a> Tokenizer<'a> {
             ',' => { self.advance(); Token::Comma }
             '(' => { self.advance(); Token::LParen }
             ')' => { self.advance(); Token::RParen }
+            '[' => { self.advance(); Token::LBracket }
+            ']' => { self.advance(); Token::RBracket }
             '?' => { self.advance(); Token::QuestionMark }  // 占位符
             '*' => { self.advance(); Token::Star }
             '+' => { self.advance(); Token::Plus }
@@ -91,11 +93,26 @@ impl<'a> Tokenizer<'a> {
 
     fn read_number(&mut self) -> Token {
         let start = self.position;
+        let mut is_float = false;
+
         while self.peek().is_ascii_digit() {
             self.advance();
         }
+
+        if self.peek() == '.' {
+            is_float = true;
+            self.advance();
+            while self.peek().is_ascii_digit() {
+                self.advance();
+            }
+        }
+
         let text = &self.input[start..self.position];
-        Token::NumberLiteral(text.parse().unwrap_or(0))
+        if is_float {
+            Token::FloatLiteral(text.parse().unwrap_or(0.0))
+        } else {
+            Token::NumberLiteral(text.parse().unwrap_or(0))
+        }
     }
 
     fn read_identifier(&mut self) -> Token {
@@ -138,6 +155,7 @@ impl<'a> Tokenizer<'a> {
             "INTEGER" => Token::Integer,
             "TEXT" => Token::Text,
             "BLOB" => Token::Blob,
+            "VECTOR" => Token::Vector,
             "LIMIT" => Token::Limit,
             "OFFSET" => Token::Offset,
             "ORDER" => Token::Order,
@@ -154,6 +172,8 @@ impl<'a> Tokenizer<'a> {
             "LEFT" => Token::Left,
             "GROUP" => Token::Group,
             "HAVING" => Token::Having,
+            "USING" => Token::Using,
+            "UNIQUE" => Token::Unique,
             _ => Token::Identifier(text.to_string()),
         }
     }

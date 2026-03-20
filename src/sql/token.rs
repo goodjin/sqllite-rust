@@ -7,11 +7,12 @@ pub enum Token {
     And, Or, Not, Null, True, False,
     Begin, Commit, Rollback, Transaction,
     Primary, Key,
-    Integer, Text, Real, Blob,
+    Integer, Text, Real, Blob, Vector,
     Limit, Offset, Order, By, Asc, Desc,
     Count, Sum, Avg, Min, Max,
     Join, Inner, Left,
     Group, Having,
+    Using, Unique,
     Identifier(String),
     StringLiteral(String),
     NumberLiteral(i64),
@@ -19,7 +20,7 @@ pub enum Token {
     Equal, NotEqual, Less, Greater,
     LessEqual, GreaterEqual,
     Plus, Minus, Star, Slash,
-    Semicolon, Comma, LParen, RParen,
+    Semicolon, Comma, LParen, RParen, LBracket, RBracket,
     QuestionMark,  // 占位符 `?`
     Eof,
 }

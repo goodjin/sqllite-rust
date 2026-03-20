@@ -53,12 +53,15 @@ impl Table {
             data.extend_from_slice(col_name_bytes);
 
             // 数据类型
-            let type_byte = match col.data_type {
-                DataType::Integer => 1u8,
-                DataType::Text => 2u8,
-                DataType::Blob => 4u8,
-            };
-            data.push(type_byte);
+            match col.data_type {
+                DataType::Integer => data.push(1),
+                DataType::Text => data.push(2),
+                DataType::Blob => data.push(4),
+                DataType::Vector(dim) => {
+                    data.push(5);
+                    data.extend_from_slice(&dim.to_be_bytes());
+                }
+            }
         }
 
         data
@@ -98,12 +101,17 @@ impl Table {
             pos += col_name_len;
 
             let data_type = match data[pos] {
-                1 => DataType::Integer,
-                2 => DataType::Text,
-                4 => DataType::Blob,
-                _ => DataType::Text,
+                1 => { pos += 1; DataType::Integer },
+                2 => { pos += 1; DataType::Text },
+                4 => { pos += 1; DataType::Blob },
+                5 => {
+                    pos += 1;
+                    let dim = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+                    pos += 4;
+                    DataType::Vector(dim)
+                }
+                _ => { pos += 1; DataType::Text },
             };
-            pos += 1;
 
             columns.push(ColumnDef {
                 name: col_name,

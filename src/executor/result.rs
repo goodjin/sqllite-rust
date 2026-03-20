@@ -12,6 +12,7 @@ pub enum ExecutorError {
     NotImplemented(String),
     InvalidOperation(String),
     ParseError(String),
+    Internal(String),
 }
 
 impl std::fmt::Display for ExecutorError {
@@ -25,6 +26,7 @@ impl std::fmt::Display for ExecutorError {
             ExecutorError::NotImplemented(feature) => write!(f, "Not implemented: {}", feature),
             ExecutorError::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
             ExecutorError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ExecutorError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }

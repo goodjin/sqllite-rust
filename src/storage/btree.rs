@@ -1,4 +1,4 @@
-use crate::storage::{Record, Result, StorageError, Value};
+use crate::storage::{Result, Value};
 use std::collections::BTreeMap;
 
 /// B+ Tree索引

@@ -1,6 +1,7 @@
-use crate::sql::ast::{Statement, Expression, BinaryOp, ColumnDef, SelectColumn, AggregateFunc, CreateIndexStmt};
+use crate::sql::ast::{Statement, Expression, BinaryOp, ColumnDef, SelectColumn, AggregateFunc, CreateIndexStmt, IndexType, DataType};
 use crate::sql::StatementCache;
 use crate::storage::{BtreeDatabase, Record, Value};
+// use crate::index::IndexError;
 
 pub mod result;
 pub mod planner;
@@ -89,7 +90,6 @@ impl Executor {
             Statement::Delete(del) => self.execute_delete(del),
             Statement::DropTable(dt) => self.execute_drop_table(dt),
             Statement::CreateIndex(ci) => self.execute_create_index(ci),
-            _ => Err(ExecutorError::NotImplemented(format!("{:?}", stmt))),
         };
 
         // 自动批量提交
@@ -183,6 +183,21 @@ impl Executor {
         self.statement_cache.clear();
     }
 
+    /// 列出所有表名
+    pub fn list_tables(&self) -> Vec<String> {
+        self.db.list_tables().into_iter().cloned().collect()
+    }
+
+    /// 获取表结构描述
+    pub fn get_table_schema(&self, table_name: &str) -> Option<String> {
+        self.db.get_table(table_name).map(|table| {
+            let cols: Vec<String> = table.columns.iter()
+                .map(|c| format!("{} {:?}", c.name, c.data_type))
+                .collect();
+            format!("CREATE TABLE {} ({})", table_name, cols.join(", "))
+        })
+    }
+
     /// 执行BEGIN TRANSACTION
     fn execute_begin(&mut self) -> Result<ExecuteResult> {
         if self.in_transaction {
@@ -249,40 +264,62 @@ impl Executor {
 
     /// 执行CREATE INDEX
     fn execute_create_index(&mut self, stmt: &CreateIndexStmt) -> Result<ExecuteResult> {
-        // 1. 创建索引结构
-        self.db.create_index(
-            stmt.index_name.clone(),
-            stmt.table.clone(),
-            stmt.column.clone(),
-        )?;
+        match stmt.index_type {
+            IndexType::BTree => {
+                // 1. 创建索引结构
+                self.db.create_index(
+                    stmt.index_name.clone(),
+                    stmt.table.clone(),
+                    stmt.column.clone(),
+                )?;
 
-        // 2. 回填现有数据到索引
-        // 获取表的列定义，找到索引列的位置
-        let column_idx = self.db.get_table(&stmt.table)
-            .ok_or(ExecutorError::TableNotFound(stmt.table.clone()))?
-            .column_index(&stmt.column)
-            .ok_or(ExecutorError::ColumnNotFound(stmt.column.clone()))?;
+                // 2. 回填现有数据到索引
+                let column_idx = self.db.get_table(&stmt.table)
+                    .ok_or(ExecutorError::TableNotFound(stmt.table.clone()))?
+                    .column_index(&stmt.column)
+                    .ok_or(ExecutorError::ColumnNotFound(stmt.column.clone()))?;
 
-        // 获取表中所有记录（包括rowid）
-        let records_with_rowid = self.db.select_all_with_rowid(&stmt.table)?;
+                let records_with_rowid = self.db.select_all_with_rowid(&stmt.table)?;
+                let index = self.db.get_index_mut(&stmt.index_name)
+                    .ok_or(ExecutorError::IndexNotFound(stmt.index_name.clone()))?;
 
-        // 获取索引的可变引用
-        let index = self.db.get_index_mut(&stmt.index_name)
-            .ok_or(ExecutorError::IndexNotFound(stmt.index_name.clone()))?;
+                let mut indexed_count = 0;
+                for (rowid, record) in records_with_rowid {
+                    if let Some(value) = record.values.get(column_idx) {
+                        index.insert(value.clone(), rowid)?;
+                        indexed_count += 1;
+                    }
+                }
+                Ok(ExecuteResult::Success(format!(
+                    "B-tree index '{}' created, indexed {} rows",
+                    stmt.index_name, indexed_count
+                )))
+            }
+            IndexType::HNSW => {
+                // Determine dimension from column definition
+                let table = self.db.get_table(&stmt.table)
+                    .ok_or(ExecutorError::TableNotFound(stmt.table.clone()))?;
+                let col_idx = table.column_index(&stmt.column)
+                    .ok_or(ExecutorError::ColumnNotFound(stmt.column.clone()))?;
+                
+                let dimension = match table.columns[col_idx].data_type {
+                    DataType::Vector(d) => d as usize,
+                    _ => return Err(ExecutorError::Internal("HNSW index only supports Vector columns".to_string())),
+                };
 
-        // 将每条记录插入索引
-        let mut indexed_count = 0;
-        for (rowid, record) in records_with_rowid {
-            if let Some(value) = record.values.get(column_idx) {
-                index.insert(value.clone(), rowid)?;
-                indexed_count += 1;
+                self.db.create_hnsw_index(
+                    stmt.index_name.clone(),
+                    stmt.table.clone(),
+                    stmt.column.clone(),
+                    dimension,
+                )?;
+                
+                Ok(ExecuteResult::Success(format!(
+                    "HNSW vector index '{}' created for column '{}'",
+                    stmt.index_name, stmt.column
+                )))
             }
         }
-
-        Ok(ExecuteResult::Success(format!(
-            "Index '{}' created on {}({}), indexed {} rows",
-            stmt.index_name, stmt.table, stmt.column, indexed_count
-        )))
     }
 
     /// 执行INSERT
@@ -295,7 +332,7 @@ impl Executor {
         let table_name = stmt.table.clone();
 
         // 获取表的所有索引信息 (索引名, 列索引位置)
-        let index_info: Vec<(String, usize)> = self.db.get_table_indexes(&table_name)
+        let _index_info: Vec<(String, usize)> = self.db.get_table_indexes(&table_name)
             .iter()
             .filter_map(|idx| {
                 let col_idx = table_columns.iter().position(|c| c.name == idx.column)?;
@@ -311,27 +348,10 @@ impl Executor {
             // 构建记录
             let record = self.build_record(&table_columns, &stmt.columns, row_values)?;
 
-            // 提取索引列的值 (在record被消耗之前)
-            let index_values: Vec<(String, usize, Value)> = index_info
-                .iter()
-                .filter_map(|(idx_name, col_idx)| {
-                    record.values.get(*col_idx)
-                        .map(|v| (idx_name.clone(), *col_idx, v.clone()))
-                })
-                .collect();
-
-            // 插入记录
+            // 插入记录 (db.insert now handles index updates for both B-tree and HNSW)
             let rowid = self.db.insert(&table_name, record)?;
             inserted_count += 1;
-
-            // 更新所有索引
-            for (idx_name, _col_idx, value) in index_values {
-                if let Some(index) = self.db.get_index_mut(&idx_name) {
-                    if let Err(e) = index.insert(value, rowid) {
-                        eprintln!("Warning: failed to update index {}: {:?}", idx_name, e);
-                    }
-                }
-            }
+            inserted_rowids.push(rowid);
 
             // 如果在事务中，记录到日志
             if self.in_transaction {
@@ -375,6 +395,7 @@ impl Executor {
                     .ok_or(ExecutorError::ColumnNotFound(col_name.clone()))?;
 
                 let value = self.evaluate_expression(&values[i])?;
+                println!("DEBUG: Evaluated column '{}' value: {:?}", col_name, value);
                 record_values[col_idx] = value;
             }
         } else {
@@ -510,12 +531,41 @@ impl Executor {
         if !stmt.order_by.is_empty() {
             filtered_records.sort_by(|a, b| {
                 for order in &stmt.order_by {
-                    let col_idx = table_columns.iter()
-                        .position(|c| c.name == order.column)
-                        .unwrap_or(0);
-                    let a_val = &a.values[col_idx];
-                    let b_val = &b.values[col_idx];
-                    let cmp = a_val.partial_cmp(b_val).unwrap_or(std::cmp::Ordering::Equal);
+                    // Try to find in table columns
+                    let a_val;
+                    let b_val;
+                    
+                    if let Some(idx) = table_columns.iter().position(|c| c.name == order.column) {
+                        a_val = a.values[idx].clone();
+                        b_val = b.values[idx].clone();
+                    } else {
+                        // Try to find in SELECT aliases
+                        let mut found_alias = false;
+                        let mut val_a = Value::Null;
+                        let mut val_b = Value::Null;
+                        
+                        for col in &stmt.columns {
+                            if let SelectColumn::Expression(expr, Some(alias)) = col {
+                                if alias == &order.column {
+                                    val_a = self.evaluate_expression_in_record(a, &table_columns, expr).unwrap_or(Value::Null);
+                                    val_b = self.evaluate_expression_in_record(b, &table_columns, expr).unwrap_or(Value::Null);
+                                    found_alias = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if found_alias {
+                            a_val = val_a;
+                            b_val = val_b;
+                        } else {
+                            // Fallback to Null
+                            a_val = Value::Null;
+                            b_val = Value::Null;
+                        }
+                    }
+
+                    let cmp = a_val.partial_cmp(&b_val).unwrap_or(std::cmp::Ordering::Equal);
                     if cmp != std::cmp::Ordering::Equal {
                         return if order.descending { cmp.reverse() } else { cmp };
                     }
@@ -542,9 +592,15 @@ impl Executor {
             }
         }
 
+        // Apply projection
+        let projected_records: Vec<Record> = filtered_records
+            .into_iter()
+            .map(|record| self.project_record(&record, &table_columns, &stmt.columns))
+            .collect::<Result<Vec<Record>>>()?;
+
         let result = QueryResult {
             columns: stmt.columns.clone(),
-            rows: filtered_records,
+            rows: projected_records,
             table_columns,
         };
 
@@ -841,8 +897,14 @@ impl Executor {
                     };
                     values.push(value);
                 }
-                _ => {
-                    // Non-aggregate columns in aggregate query - not supported yet
+                SelectColumn::Expression(expr, _) => {
+                    if let Some(first) = records.first() {
+                        values.push(self.evaluate_expression_in_record(first, table_columns, expr).unwrap_or(Value::Null));
+                    } else {
+                        values.push(Value::Null);
+                    }
+                }
+                SelectColumn::Column(_) | SelectColumn::All => {
                     values.push(Value::Null);
                 }
             }
@@ -977,7 +1039,10 @@ impl Executor {
                         values.push(Value::Null);
                     }
                 }
-                _ => {
+                SelectColumn::Expression(expr, _) => {
+                    values.push(self.evaluate_expression_in_record(&records[0], table_columns, expr).unwrap_or(Value::Null));
+                }
+                SelectColumn::All => {
                     values.push(Value::Null);
                 }
             }
@@ -999,6 +1064,7 @@ impl Executor {
             .map(|(i, col)| {
                 let name = match col {
                     SelectColumn::Column(n) => n.clone(),
+                    SelectColumn::Expression(_, alias) => alias.clone().unwrap_or_else(|| format!("col_{}", i)),
                     SelectColumn::Aggregate(_) => format!("agg_{}", i),
                     SelectColumn::All => format!("col_{}", i),
                 };
@@ -1040,7 +1106,7 @@ impl Executor {
                     let col_idx = table_columns.iter()
                         .position(|c| c.name == set_clause.column)
                         .ok_or(ExecutorError::ColumnNotFound(set_clause.column.clone()))?;
-                    let value = self.evaluate_expression(&set_clause.value)?;
+                    let value = self.evaluate_expression_in_record(&record, &table_columns, &set_clause.value)?;
                     new_record.values[col_idx] = value;
                 }
                 // 实际更新记录
@@ -1099,6 +1165,25 @@ impl Executor {
             Expression::Column(_) => Err(ExecutorError::NotImplemented("Column reference in value".to_string())),
             Expression::Placeholder(_) => Err(ExecutorError::NotImplemented("Unbound placeholder - use execute_prepared with parameters".to_string())),
             Expression::Binary { .. } => Err(ExecutorError::NotImplemented("Binary expression in value".to_string())),
+            Expression::Vector(elements) => {
+                let mut vals = Vec::with_capacity(elements.len());
+                for e in elements {
+                    let val = self.evaluate_expression(e)?;
+                    match val {
+                        Value::Real(f) => vals.push(f as f32),
+                        Value::Integer(n) => vals.push(n as f32),
+                        _ => return Err(ExecutorError::NotImplemented("Non-numeric vector element".to_string())),
+                    }
+                }
+                Ok(Value::Vector(vals))
+            }
+            Expression::FunctionCall { name, args } => {
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_vals.push(self.evaluate_expression(arg)?);
+                }
+                self.execute_function(name, arg_vals)
+            }
         }
     }
 
@@ -1169,7 +1254,118 @@ impl Executor {
                     .ok_or(ExecutorError::ColumnNotFound(col_name.clone()))?;
                 Ok(record.values[col_idx].clone())
             }
+            Expression::Binary { left, op, right } => {
+                let left_val = self.evaluate_expression_in_record(record, table_columns, left)?;
+                let right_val = self.evaluate_expression_in_record(record, table_columns, right)?;
+                match op {
+                    BinaryOp::Add => Ok(left_val + right_val),
+                    BinaryOp::Sub => Ok(left_val - right_val),
+                    BinaryOp::Mul => Ok(left_val * right_val),
+                    BinaryOp::Div => Ok(left_val / right_val),
+                    BinaryOp::Equal => Ok(Value::Integer(if left_val == right_val { 1 } else { 0 })),
+                    BinaryOp::NotEqual => Ok(Value::Integer(if left_val != right_val { 1 } else { 0 })),
+                    BinaryOp::Less => Ok(Value::Integer(if left_val < right_val { 1 } else { 0 })),
+                    BinaryOp::Greater => Ok(Value::Integer(if left_val > right_val { 1 } else { 0 })),
+                    BinaryOp::LessEqual => Ok(Value::Integer(if left_val <= right_val { 1 } else { 0 })),
+                    BinaryOp::GreaterEqual => Ok(Value::Integer(if left_val >= right_val { 1 } else { 0 })),
+                    _ => self.evaluate_expression(expr),
+                }
+            }
+            Expression::Vector(elements) => {
+                let mut vals = Vec::with_capacity(elements.len());
+                for e in elements {
+                    let val = self.evaluate_expression_in_record(record, table_columns, e)?;
+                    match val {
+                        Value::Real(f) => vals.push(f as f32),
+                        Value::Integer(n) => vals.push(n as f32),
+                        _ => return Err(ExecutorError::NotImplemented("Non-numeric vector element".to_string())),
+                    }
+                }
+                Ok(Value::Vector(vals))
+            }
+            Expression::FunctionCall { name, args } => {
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_vals.push(self.evaluate_expression_in_record(record, table_columns, arg)?);
+                }
+                self.execute_function(name, arg_vals)
+            }
             _ => self.evaluate_expression(expr),
+        }
+    }
+
+    /// 对记录进行投影
+    fn project_record(&self, record: &Record, table_columns: &[ColumnDef], columns: &[SelectColumn]) -> Result<Record> {
+        let mut values = Vec::new();
+        for col in columns {
+            match col {
+                SelectColumn::All => {
+                    values.extend(record.values.clone());
+                }
+                SelectColumn::Column(name) => {
+                    if let Some(idx) = table_columns.iter().position(|c| c.name == *name) {
+                        values.push(record.values[idx].clone());
+                    } else {
+                        values.push(Value::Null);
+                    }
+                }
+                SelectColumn::Expression(expr, _) => {
+                    values.push(self.evaluate_expression_in_record(record, table_columns, expr).unwrap_or(Value::Null));
+                }
+                SelectColumn::Aggregate(_) => {
+                    // 聚合函数在 project_record 中不直接支持，已在 execute_select 中处理
+                    values.push(Value::Null);
+                }
+            }
+        }
+        Ok(Record::new(values))
+    }
+
+    fn execute_function(&self, name: &str, args: Vec<Value>) -> Result<Value> {
+        match name.to_uppercase().as_str() {
+            "L2_DISTANCE" | "VECTOR_L2_DISTANCE" => {
+                if args.len() != 2 {
+                    return Err(ExecutorError::NotImplemented("L2_DISTANCE requires 2 arguments".to_string()));
+                }
+                if let (Value::Vector(v1), Value::Vector(v2)) = (&args[0], &args[1]) {
+                    if v1.len() != v2.len() {
+                        return Err(ExecutorError::NotImplemented(format!("Vector dimensions must match ({} vs {})", v1.len(), v2.len())));
+                    }
+                    let mut sum = 0.0;
+                    for (x, y) in v1.iter().zip(v2.iter()) {
+                        sum += (x - y) * (x - y);
+                    }
+                    Ok(Value::Real(sum.sqrt() as f64))
+                } else {
+                    Err(ExecutorError::NotImplemented("L2_DISTANCE arguments must be vectors".to_string()))
+                }
+            }
+            "COSINE_SIMILARITY" | "VECTOR_COSINE_SIMILARITY" => {
+                if args.len() != 2 {
+                    return Err(ExecutorError::NotImplemented("COSINE_SIMILARITY requires 2 arguments".to_string()));
+                }
+                if let (Value::Vector(v1), Value::Vector(v2)) = (&args[0], &args[1]) {
+                    if v1.len() != v2.len() {
+                        return Err(ExecutorError::NotImplemented(format!("Vector dimensions must match ({} vs {})", v1.len(), v2.len())));
+                    }
+                    let mut dot = 0.0;
+                    let mut norm1 = 0.0;
+                    let mut norm2 = 0.0;
+                    for (x, y) in v1.iter().zip(v2.iter()) {
+                        dot += x * y;
+                        norm1 += x * x;
+                        norm2 += y * y;
+                    }
+                    if norm1 == 0.0 || norm2 == 0.0 {
+                        Ok(Value::Real(0.0))
+                    } else {
+                        Ok(Value::Real((dot / (norm1.sqrt() * norm2.sqrt())) as f64))
+                    }
+                } else {
+                    Err(ExecutorError::NotImplemented("COSINE_SIMILARITY arguments must be vectors".to_string()))
+                }
+            }
+            _ => Err(ExecutorError::NotImplemented(format!("Function {} not found", name))),
         }
     }
 
@@ -1200,23 +1396,34 @@ pub struct QueryResult {
 impl QueryResult {
     /// 打印结果
     pub fn print(&self) {
-        // 打印列名
-        let col_names: Vec<String> = self.columns.iter()
-            .map(|c| match c {
-                crate::sql::ast::SelectColumn::All => "*".to_string(),
-                crate::sql::ast::SelectColumn::Column(name) => name.clone(),
-                crate::sql::ast::SelectColumn::Aggregate(agg) => format!("{:?}", agg),
-            })
-            .collect();
-        println!("{}", col_names.join(" | "));
-        println!("{}", "-".repeat(50));
+        // 1. 展开列名以获得最终标题
+        let mut headers = Vec::new();
+        for (i, col) in self.columns.iter().enumerate() {
+            match col {
+                crate::sql::ast::SelectColumn::All => {
+                    for tc in &self.table_columns {
+                        headers.push(tc.name.clone());
+                    }
+                }
+                crate::sql::ast::SelectColumn::Column(name) => {
+                    headers.push(name.clone());
+                }
+                crate::sql::ast::SelectColumn::Expression(_, alias) => {
+                    headers.push(alias.clone().unwrap_or_else(|| format!("col_{}", i)));
+                }
+                crate::sql::ast::SelectColumn::Aggregate(agg) => {
+                    headers.push(format!("{:?}", agg));
+                }
+            }
+        }
 
-        // 打印行
+        println!("{}", headers.join(" | "));
+        println!("{}", "-".repeat(std::cmp::max(20, headers.join(" | ").len())));
+
+        // 2. 打印行（它们已经投影过，应该与标题 1:1 匹配）
         for record in &self.rows {
-            let values: Vec<String> = record.values.iter()
-                .map(|v| format!("{}", v))
-                .collect();
-            println!("{}", values.join(" | "));
+            let row_strings: Vec<String> = record.values.iter().map(|v| format!("{}", v)).collect();
+            println!("{}", row_strings.join(" | "));
         }
 
         println!("({} row(s))", self.rows.len());

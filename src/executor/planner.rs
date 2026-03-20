@@ -52,6 +52,14 @@ pub enum QueryPlan {
         columns: Vec<SelectColumn>,
         limit: Option<i64>,
     },
+    /// HNSW vector similarity scan
+    HnswVectorScan {
+        table: String,
+        index_name: String,
+        query_vector: Vec<f32>,
+        limit: usize,
+        columns: Vec<SelectColumn>,
+    },
 }
 
 /// Query plan optimizer
@@ -65,6 +73,51 @@ impl QueryPlanner {
         // Check if table exists
         if db.get_table(table).is_none() {
             return Err(ExecutorError::TableNotFound(table.clone()));
+        }
+
+        // Try to optimize for Vector Search (HNSW)
+        if !stmt.order_by.is_empty() && stmt.limit.is_some() {
+            let first_order = &stmt.order_by[0];
+            
+            // Check if any column in SELECT is vector_l2_distance and matches the ORDER BY
+            for col in &stmt.columns {
+                if let SelectColumn::Expression(Expression::FunctionCall { name, args }, alias) = col {
+                    if name == "vector_l2_distance" && args.len() == 2 {
+                        let matches_order = if let Some(alias_name) = alias {
+                            alias_name == &first_order.column
+                        } else {
+                            // If no alias, the column identifier might be the function call string, 
+                            // but currently our parser/tokenizer might just treat it as an identifier if it's in ORDER BY.
+                            false
+                        };
+
+                        if matches_order {
+                            if let (Expression::Column(col_name), Expression::Vector(query_exprs)) = (&args[0], &args[1]) {
+                                if let Some(index_name) = Self::find_hnsw_index_for_column(db, table, col_name) {
+                                    let mut query_vector = Vec::new();
+                                    for expr in query_exprs {
+                                         if let Some(Value::Real(f)) = Self::expression_to_value(expr) {
+                                             query_vector.push(f as f32);
+                                         } else if let Some(Value::Integer(i)) = Self::expression_to_value(expr) {
+                                             query_vector.push(i as f32);
+                                         }
+                                    }
+                                    
+                                    if !query_vector.is_empty() {
+                                        return Ok(QueryPlan::HnswVectorScan {
+                                            table: table.clone(),
+                                            index_name,
+                                            query_vector,
+                                            limit: stmt.limit.unwrap() as usize,
+                                            columns: stmt.columns.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Extract usable conditions from WHERE clause
@@ -242,14 +295,35 @@ impl QueryPlanner {
             Expression::Float(f) => Some(Value::Real(*f)),
             Expression::Boolean(b) => Some(if *b { Value::Integer(1) } else { Value::Integer(0) }),
             Expression::Null => Some(Value::Null),
+            Expression::Vector(elements) => {
+                let mut vals = Vec::with_capacity(elements.len());
+                for e in elements {
+                    match Self::expression_to_value(e)? {
+                        Value::Real(f) => vals.push(f as f32),
+                        Value::Integer(n) => vals.push(n as f32),
+                        _ => return None,
+                    }
+                }
+                Some(Value::Vector(vals))
+            }
             _ => None,
         }
     }
 
     /// Check if column is rowid/primary key
     /// Only "rowid" is treated as rowid, not "id"
-    fn is_rowid_column(column: &str) -> bool {
-        column.eq_ignore_ascii_case("rowid")
+    fn is_rowid_column(col: &str) -> bool {
+        col.to_lowercase() == "rowid" || col.to_lowercase() == "id"
+    }
+
+    fn find_hnsw_index_for_column(db: &BtreeDatabase, table_name: &str, column: &str) -> Option<String> {
+        let table = db.get_table(table_name)?;
+        for idx in &table.hnsw_indices {
+            if idx.column == column {
+                return Some(idx.name.clone());
+            }
+        }
+        None
     }
 
     /// Find an index for the given column
@@ -287,6 +361,10 @@ impl QueryPlanner {
                 // Full scan: O(n)
                 db.get_table(table).map(|t| t.next_rowid).unwrap_or(0)
             }
+            QueryPlan::HnswVectorScan { .. } => {
+                // HNSW vector scan: O(log n) + constant overhead
+                10
+            }
         }
     }
 }
@@ -316,6 +394,9 @@ impl PlanExecutor {
             }
             QueryPlan::FullTableScan { table, filter, limit, .. } => {
                 Self::execute_full_scan(db, table, filter.as_ref(), table_columns, *limit)
+            }
+            QueryPlan::HnswVectorScan { index_name, query_vector, limit, .. } => {
+                Self::execute_hnsw_vector_scan(db, index_name, query_vector, *limit)
             }
         }
     }
@@ -478,6 +559,17 @@ impl PlanExecutor {
             Expression::Float(f) => Some(Value::Real(*f)),
             Expression::Boolean(b) => Some(if *b { Value::Integer(1) } else { Value::Integer(0) }),
             Expression::Null => Some(Value::Null),
+            Expression::Vector(elements) => {
+                let mut vals = Vec::with_capacity(elements.len());
+                for e in elements {
+                    match Self::expression_to_value(e)? {
+                        Value::Real(f) => vals.push(f as f32),
+                        Value::Integer(n) => vals.push(n as f32),
+                        _ => return None,
+                    }
+                }
+                Some(Value::Vector(vals))
+            }
             _ => None,
         }
     }
@@ -493,6 +585,17 @@ impl PlanExecutor {
             BinaryOp::GreaterEqual => left >= right,
             _ => true,
         }
+    }
+
+    /// Execute HNSW vector similarity scan
+    fn execute_hnsw_vector_scan(
+        db: &mut BtreeDatabase,
+        index_name: &str,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Record>> {
+        let results = db.vector_search(index_name, query_vector, limit)?;
+        Ok(results.into_iter().map(|(r, _)| r).collect())
     }
 }
 

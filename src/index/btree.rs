@@ -435,6 +435,14 @@ fn serialize_value(value: &Value) -> Vec<u8> {
             bytes.extend_from_slice(b);
             bytes
         }
+        Value::Vector(v) => {
+            let mut bytes = vec![5];
+            bytes.extend_from_slice(&(v.len() as u32).to_be_bytes());
+            for x in v {
+                bytes.extend_from_slice(&x.to_be_bytes());
+            }
+            bytes
+        }
     }
 }
 
@@ -494,6 +502,25 @@ fn deserialize_value(data: &[u8], pos: &mut usize) -> Option<Value> {
             let b = data[*pos..*pos + len].to_vec();
             *pos += len;
             Some(Value::Blob(b))
+        }
+        5 => {
+            if *pos + 4 > data.len() {
+                return None;
+            }
+            let len = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]) as usize;
+            *pos += 4;
+            if *pos + len * 4 > data.len() {
+                return None;
+            }
+            let mut vector = Vec::with_capacity(len);
+            for _ in 0..len {
+                let x = f32::from_be_bytes([
+                    data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3],
+                ]);
+                vector.push(x);
+                *pos += 4;
+            }
+            Some(Value::Vector(vector))
         }
         _ => None,
     }

@@ -11,6 +11,14 @@ use crate::storage::overflow::OverflowManager;
 use crate::pager::{PageId, Pager};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone)]
+pub struct HnswIndexMetadata {
+    pub name: String,
+    pub column: String,
+    pub root_page: PageId,
+    pub dimension: usize,
+}
+
 /// Table metadata for B-tree storage
 #[derive(Debug, Clone)]
 pub struct BtreeTable {
@@ -18,6 +26,7 @@ pub struct BtreeTable {
     pub columns: Vec<ColumnDef>,
     pub root_page: PageId,
     pub next_rowid: u64,
+    pub hnsw_indices: Vec<HnswIndexMetadata>,
 }
 
 impl BtreeTable {
@@ -27,6 +36,7 @@ impl BtreeTable {
             columns,
             root_page,
             next_rowid: 1,
+            hnsw_indices: Vec::new(),
         }
     }
 
@@ -61,12 +71,30 @@ impl BtreeTable {
             data.extend_from_slice(col_name_bytes);
 
             // Data type
-            let type_byte = match col.data_type {
-                DataType::Integer => 1u8,
-                DataType::Text => 2u8,
-                DataType::Blob => 4u8,
-            };
-            data.push(type_byte);
+            match col.data_type {
+                DataType::Integer => data.push(1),
+                DataType::Text => data.push(2),
+                DataType::Blob => data.push(4),
+                DataType::Vector(dim) => {
+                    data.push(5);
+                    data.extend_from_slice(&dim.to_be_bytes());
+                }
+            }
+        }
+
+        // Vector index count
+        data.push(self.hnsw_indices.len() as u8);
+        for idx in &self.hnsw_indices {
+            let name_bytes = idx.name.as_bytes();
+            data.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+            data.extend_from_slice(name_bytes);
+            
+            let col_bytes = idx.column.as_bytes();
+            data.extend_from_slice(&(col_bytes.len() as u32).to_be_bytes());
+            data.extend_from_slice(col_bytes);
+
+            data.extend_from_slice(&idx.root_page.to_be_bytes());
+            data.extend_from_slice(&(idx.dimension as u32).to_be_bytes());
         }
 
         data
@@ -106,12 +134,17 @@ impl BtreeTable {
             pos += col_name_len;
 
             let data_type = match data[pos] {
-                1 => DataType::Integer,
-                2 => DataType::Text,
-                4 => DataType::Blob,
-                _ => DataType::Text,
+                1 => { pos += 1; DataType::Integer },
+                2 => { pos += 1; DataType::Text },
+                4 => { pos += 1; DataType::Blob },
+                5 => {
+                    pos += 1;
+                    let dim = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+                    pos += 4;
+                    DataType::Vector(dim)
+                }
+                _ => { pos += 1; DataType::Text },
             };
-            pos += 1;
 
             columns.push(ColumnDef {
                 name: col_name,
@@ -121,11 +154,43 @@ impl BtreeTable {
             });
         }
 
+        // Read HNSW index count
+        let mut hnsw_indices = Vec::new();
+        if pos < data.len() {
+            let hnsw_count = data[pos] as usize;
+            pos += 1;
+
+            for _ in 0..hnsw_count {
+                // Name
+                let name_len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+                pos += 4;
+                let name = String::from_utf8_lossy(&data[pos..pos+name_len]).to_string();
+                pos += name_len;
+
+                // Column
+                let col_len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+                pos += 4;
+                let column = String::from_utf8_lossy(&data[pos..pos+col_len]).to_string();
+                pos += col_len;
+
+                // Root Page
+                let root_page = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]);
+                pos += 4;
+
+                // Dimension
+                let dimension = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+                pos += 4;
+
+                hnsw_indices.push(HnswIndexMetadata { name, column, root_page, dimension });
+            }
+        }
+
         Ok(Self {
             name,
             columns,
             root_page,
             next_rowid,
+            hnsw_indices,
         })
     }
 }
@@ -136,8 +201,9 @@ pub struct BtreeDatabase {
     tables: HashMap<String, BtreeTable>,
     btree_storages: HashMap<String, BtreeStorage>,
     indexes: HashMap<String, BPlusTreeIndex>,
+    hnsw_indexes: HashMap<String, crate::index::HnswIndex>,
     schema_page: PageId,
-    overflow_mgr: OverflowManager,
+    _overflow_mgr: OverflowManager,
 }
 
 impl BtreeDatabase {
@@ -148,6 +214,7 @@ impl BtreeDatabase {
 
         let mut tables = HashMap::new();
         let mut btree_storages = HashMap::new();
+        let mut hnsw_indexes = HashMap::new();
 
         // Try to load existing tables
         if pager.header().database_size > schema_page {
@@ -166,6 +233,19 @@ impl BtreeDatabase {
                     if let Ok(table) = BtreeTable::deserialize(table_data) {
                         let btree = BtreeStorage::new(table.root_page);
                         btree_storages.insert(table.name.clone(), btree);
+                        
+                        // Load HNSW indices
+                        for idx_meta in &table.hnsw_indices {
+                            let hnsw = crate::index::HnswIndex::new(
+                                idx_meta.name.clone(),
+                                table.name.clone(),
+                                idx_meta.column.clone(),
+                                idx_meta.root_page,
+                                idx_meta.dimension,
+                            );
+                            hnsw_indexes.insert(idx_meta.name.clone(), hnsw);
+                        }
+
                         tables.insert(table.name.clone(), table);
                     }
                     pos += table_data_len;
@@ -178,6 +258,7 @@ impl BtreeDatabase {
             tables,
             btree_storages,
             indexes: HashMap::new(),
+            hnsw_indexes,
             schema_page,
             overflow_mgr: OverflowManager::new(),
         })
@@ -262,6 +343,88 @@ impl BtreeDatabase {
 
         self.indexes.insert(index_name, index);
         Ok(())
+    }
+
+    /// Create an HNSW index
+    pub fn create_hnsw_index(
+        &mut self,
+        index_name: String,
+        table_name: String,
+        column_name: String,
+        dimension: usize,
+    ) -> Result<()> {
+        if !self.tables.contains_key(&table_name) {
+            return Err(StorageError::KeyNotFound);
+        }
+
+        // Allocate a root page for the HNSW index
+        let root_page = self.pager.allocate_page()?;
+        
+        let mut index = crate::index::HnswIndex::new(
+            index_name.clone(),
+            table_name.clone(),
+            column_name.clone(),
+            root_page,
+            dimension,
+        );
+        index.init(&mut self.pager).map_err(|e| StorageError::Other(format!("HNSW init error: {:?}", e)))?;
+        
+        // Populate index from existing data
+        let table = self.tables.get(&table_name).unwrap();
+        let btree = self.btree_storages.get(&table_name).ok_or(StorageError::KeyNotFound)?;
+        let col_idx = table.column_index(&column_name).ok_or(StorageError::KeyNotFound)?;
+        
+        let mut curr_rowid = 1u64;
+        while curr_rowid < table.next_rowid {
+            let key = curr_rowid.to_be_bytes().to_vec();
+            if let Ok(Some(value)) = btree.search(&mut self.pager, &key) {
+                let record = Record::deserialize(&value)?;
+                if let Some(Value::Vector(vec)) = record.values.get(col_idx) {
+                    index.insert(&mut self.pager, vec, curr_rowid).map_err(|e| StorageError::Other(format!("HNSW insert error: {:?}", e)))?;
+                }
+            }
+            curr_rowid += 1;
+        }
+
+        let table_mut = self.tables.get_mut(&table_name).unwrap();
+        table_mut.hnsw_indices.push(HnswIndexMetadata {
+            name: index_name.clone(),
+            column: column_name,
+            root_page,
+            dimension,
+        });
+        
+        self.hnsw_indexes.insert(index_name, index);
+        self.save_schema()?;
+        Ok(())
+    }
+
+    /// Search vector nearest neighbors using HNSW index
+    pub fn vector_search(
+        &mut self,
+        index_name: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(Record, f32)>> {
+        let (table_name, _col_names) = {
+            let index = self.hnsw_indexes.get(index_name).ok_or(StorageError::KeyNotFound)?;
+            let table = self.tables.get(&index.table_name).ok_or(StorageError::KeyNotFound)?;
+            (index.table_name.clone(), table.columns.clone())
+        };
+
+        let results = {
+            let index = self.hnsw_indexes.get_mut(index_name).ok_or(StorageError::KeyNotFound)?;
+            index.search(&mut self.pager, query, k).map_err(|e| StorageError::Other(format!("HNSW search error: {:?}", e)))?
+        };
+
+        let mut final_results = Vec::new();
+        for (rowid, dist) in results {
+            if let Ok(record) = self.get_record(&table_name, rowid) {
+                final_results.push((record, dist));
+            }
+        }
+        
+        Ok(final_results)
     }
 
     /// Get an index
@@ -396,11 +559,28 @@ impl BtreeDatabase {
         };
 
         // Update indexes
+        // Update B-trees (simplified memory-based ones)
         for (index_name, key) in indexes_to_update {
-            if let Some(idx) = self.get_index_mut(&index_name) {
-                idx.insert(key, rowid)?;
+            if let Some(index) = self.indexes.get_mut(&index_name) {
+                index.insert(key, rowid)?;
             }
         }
+
+        // Update HNSW indices (disk-based)
+        let table = self.tables.get(table_name).ok_or(StorageError::KeyNotFound)?;
+        let hnsw_metas = table.hnsw_indices.clone();
+        for idx_meta in hnsw_metas {
+            if let Some(col_idx) = table.column_index(&idx_meta.column) {
+                if let Some(val) = record.values.get(col_idx) {
+                    if let Value::Vector(vec) = val {
+                        if let Some(hnsw) = self.hnsw_indexes.get_mut(&idx_meta.name) {
+                            hnsw.insert(&mut self.pager, vec, rowid).map_err(|e| StorageError::Other(format!("HNSW update error: {:?}", e)))?;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -46,7 +46,7 @@ impl StatementCache {
             max_size,
             hit_count: 0,
             miss_count: 0,
-            auto_normalize: true, // 默认启用自动规范化
+            auto_normalize: false, // 默认禁用自动规范化，避免不同 SQL 共享相同 Statement
         }
     }
 
@@ -231,20 +231,30 @@ fn normalize_statement(stmt: &mut Statement) {
 /// 规范化表达式：将字面量替换为占位符
 fn normalize_expression(expr: &mut Expression) {
     match expr {
-        Expression::Integer(n) => {
+        Expression::Integer(_) => {
             // 替换为占位符
             *expr = Expression::Placeholder(1);
         }
-        Expression::String(s) => {
+        Expression::String(_) => {
             // 替换为占位符
             *expr = Expression::Placeholder(1);
         }
-        Expression::Float(f) => {
+        Expression::Float(_) => {
             *expr = Expression::Placeholder(1);
         }
         Expression::Binary { left, right, .. } => {
             normalize_expression(left);
             normalize_expression(right);
+        }
+        Expression::Vector(elements) => {
+            for e in elements {
+                normalize_expression(e);
+            }
+        }
+        Expression::FunctionCall { args, .. } => {
+            for arg in args {
+                normalize_expression(arg);
+            }
         }
         _ => {}
     }
@@ -280,7 +290,13 @@ fn replace_placeholders(expr: &Expression, params: &[Expression]) -> Expression 
             op: op.clone(),
             right: Box::new(replace_placeholders(right, params)),
         },
-        // 其他表达式类型直接克隆
+        Expression::Vector(elements) => Expression::Vector(
+            elements.iter().map(|e| replace_placeholders(e, params)).collect()
+        ),
+        Expression::FunctionCall { name, args } => Expression::FunctionCall {
+            name: name.clone(),
+            args: args.iter().map(|arg| replace_placeholders(arg, params)).collect(),
+        },
         other => other.clone(),
     }
 }
@@ -358,6 +374,12 @@ fn count_expr_placeholders(expr: &Expression) -> usize {
         Expression::Placeholder(_) => 1,
         Expression::Binary { left, right, .. } => {
             count_expr_placeholders(left) + count_expr_placeholders(right)
+        }
+        Expression::Vector(elements) => {
+            elements.iter().map(|e| count_expr_placeholders(e)).sum()
+        }
+        Expression::FunctionCall { args, .. } => {
+            args.iter().map(|arg| count_expr_placeholders(arg)).sum()
         }
         _ => 0,
     }
