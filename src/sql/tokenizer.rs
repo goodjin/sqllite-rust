@@ -174,6 +174,32 @@ impl<'a> Tokenizer<'a> {
             "HAVING" => Token::Having,
             "USING" => Token::Using,
             "UNIQUE" => Token::Unique,
+            "EXISTS" => Token::Exists,
+            "IN" => Token::In,
+            // Foreign key keywords
+            "FOREIGN" => Token::Foreign,
+            "REFERENCES" => Token::References,
+            "CASCADE" => Token::Cascade,
+            "RESTRICT" => Token::Restrict,
+            "DEFAULT" => Token::Default,
+            "ACTION" => Token::Action,
+            "NO" => Token::No,
+            "DEFERRABLE" => Token::Deferrable,
+            "DEFERRED" => Token::Deferred,
+            "IMMEDIATE" => Token::Immediate,
+            // ALTER TABLE keywords
+            "ALTER" => Token::Alter,
+            "ADD" => Token::Add,
+            "COLUMN" => Token::Column,
+            "RENAME" => Token::Rename,
+            "TO" => Token::To,
+            // View keywords
+            "VIEW" => Token::View,
+            "AS" => Token::As,
+            "IF" => Token::If,
+            // CTE keywords
+            "WITH" => Token::With,
+            "RECURSIVE" => Token::Recursive,
             _ => Token::Identifier(text.to_string()),
         }
     }

@@ -1,217 +1,319 @@
-# SQLite 性能对比测试方案
+# 性能测试方案 - OLTP 聚焦
 
-## 测试环境准备
+## 测试目标
 
-### 1. 安装 SQLite (如果尚未安装)
+验证 sqllite-rust 作为**事务型数据库（OLTP）**替代 SQLite 的能力。
+
+**核心原则**:
+- 不测大规模分析查询（不是我们的目标场景）
+- 不测 GPU/向量化（不适合 OLTP）
+- 重点测并发、点查、小范围查询、事务
+
+---
+
+## 测试环境
+
 ```bash
-# macOS
-brew install sqlite3
+# 安装 SQLite 对比基准
+brew install sqlite3  # macOS
+sudo apt-get install sqlite3  # Ubuntu
 
-# Ubuntu/Debian
-sudo apt-get install sqlite3
-
-# 验证安装
+# 验证
 sqlite3 --version
 ```
 
-### 2. 运行基准测试
-```bash
-# 运行所有基准测试
-cargo bench
-
-# 运行特定测试组
-cargo bench single_insert
-cargo bench indexed_select
-
-# 生成详细报告（包含图表）
-cargo bench -- --verbose
-```
-
 ---
 
-## 测试方案详解
+## 测试方案
 
-### 方案 1: 单条插入性能 (single_insert)
-**目的**: 测试无事务包裹的单条 INSERT 性能
+### 测试 1: 点查性能 (point_select)
 
-**测试规模**: 100, 1000, 5000 条记录
+**场景**: 通过主键查询单条记录（最常见 OLTP 操作）
 
-**SQL 示例**:
+**数据规模**: 10万条记录
+
+**SQL**:
 ```sql
-CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);
-INSERT INTO users VALUES (1, 'User1', 'user1@example.com');
--- ... 每条单独执行
+SELECT * FROM users WHERE id = ?;
 ```
 
-**关注指标**:
-- 每条 INSERT 的平均耗时
-- 与 SQLite 的性能差距倍数
+**测试方法**:
+- 随机选择 id，执行 10000 次
+- 测量平均延迟、P99 延迟
 
-**预期差异原因**:
-- 原生 SQLite 使用 C 语言，执行效率更高
-- 本实现每次执行需要解析 SQL、编译 VM 指令
+**目标**:
+| 指标 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 平均延迟 | 0.03ms | 0.1ms | <0.05ms |
+| P99 延迟 | 0.05ms | 0.2ms | <0.1ms |
 
 ---
 
-### 方案 2: 批量插入性能 (batch_insert)
-**目的**: 测试事务包裹的批量插入性能
+### 测试 2: 索引查询 (index_select)
 
-**测试规模**: 1000, 10000, 50000 条记录
+**场景**: 通过二级索引查询（覆盖索引 vs 非覆盖索引）
 
-**SQL 示例**:
+**数据规模**: 10万条记录
+
+**SQL**:
+```sql
+-- 覆盖索引（只需读索引页）
+SELECT email FROM users WHERE email = ?;
+
+-- 非覆盖索引（需要回表）
+SELECT * FROM users WHERE email = ?;
+```
+
+**目标**:
+| 指标 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 覆盖索引 | 0.02ms | 0.08ms | <0.04ms |
+| 非覆盖索引 | 0.05ms | 0.15ms | <0.08ms |
+
+**优化方向**: 覆盖索引避免回表
+
+---
+
+### 测试 3: 范围查询 (range_select)
+
+**场景**: 查询一定范围内的记录（分页查询）
+
+**数据规模**: 100万条记录
+
+**SQL**:
+```sql
+SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10;
+```
+
+**目标**:
+| 返回行数 | SQLite | 当前 | 目标 |
+|----------|--------|------|------|
+| 10行 | 0.5ms | 2ms | <1ms |
+| 100行 | 2ms | 8ms | <3ms |
+| 1000行 | 15ms | 50ms | <20ms |
+
+**优化方向**: B+Tree 预读、更好的缓存策略
+
+---
+
+### 测试 4: 单条插入 (single_insert)
+
+**场景**: 自动提交模式下的单条插入
+
+**SQL**:
+```sql
+INSERT INTO logs VALUES (?, ?, ?);
+-- 自动 COMMIT
+```
+
+**目标**:
+| 指标 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 吞吐 | ~1000 ops/s | ~100 ops/s | >500 ops/s |
+| 延迟 | 1ms | 10ms | <2ms |
+
+**优化方向**: WAL 优化、异步刷盘
+
+---
+
+### 测试 5: 批量插入 (batch_insert)
+
+**场景**: 事务包裹的批量插入
+
+**SQL**:
 ```sql
 BEGIN;
-INSERT INTO logs VALUES (1, 'Log message 1', 123456);
--- ... 多条
+INSERT INTO logs VALUES (?, ?, ?);
+-- 重复 N 次
 COMMIT;
 ```
 
-**关注指标**:
-- 批量插入吞吐量 (条/秒)
-- 事务提交耗时
+**目标**:
+| 批量大小 | SQLite | 当前 | 目标 |
+|----------|--------|------|------|
+| 100条 | 5K ops/s | 1K ops/s | >4K ops/s |
+| 1000条 | 20K ops/s | 5K ops/s | >15K ops/s |
+| 10000条 | 50K ops/s | 10K ops/s | >40K ops/s |
 
-**预期差异原因**:
-- WAL 模式 vs 普通日志模式
-- 页面缓存策略差异
+**优化方向**: WAL 组提交、批量处理
 
 ---
 
-### 方案 3: 简单查询性能 (simple_select)
-**目的**: 测试全表扫描查询性能
+### 测试 6: 事务更新 (transaction_update)
 
-**测试规模**: 1000, 10000, 100000 条记录
+**场景**: 读取-修改-写入事务（典型银行转账场景）
 
-**SQL 示例**:
+**SQL**:
 ```sql
-SELECT * FROM products WHERE price > 50.0;
+BEGIN;
+SELECT balance FROM accounts WHERE id = ?;
+-- 应用层: new_balance = balance - 100
+UPDATE accounts SET balance = ? WHERE id = ?;
+COMMIT;
 ```
 
-**关注指标**:
-- 全表扫描速度
-- 数据过滤效率
+**目标**:
+| 指标 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 吞吐 | ~500 TPS | ~50 TPS | >400 TPS |
 
 ---
 
-### 方案 4: 索引查询性能 (indexed_select)
-**目的**: 对比有索引 vs 无索引的查询性能
+### 测试 7: 并发读取 (concurrent_read) ⭐ 核心
 
-**测试规模**: 1000, 10000, 100000 条记录
+**场景**: 多线程同时读取（这是我们要超越 SQLite 的核心场景）
 
-**SQL 示例**:
+**测试方法**:
+- 100万条记录预热
+- 10/50/100 个线程并发
+- 每个线程执行 1000 次点查
+
+**SQL**:
 ```sql
--- 带索引
-CREATE INDEX idx_email ON users(email);
-SELECT * FROM users WHERE email = 'user500@example.com';
-
--- 无索引（全表扫描）
-SELECT * FROM users_no_idx WHERE email = 'user500@example.com';
+SELECT * FROM users WHERE id = ?;
 ```
 
-**关注指标**:
-- 索引查找 vs 全表扫描的时间比
-- B-tree 索引效率
+**目标**:
+| 并发数 | SQLite | 当前 | 目标 |
+|--------|--------|------|------|
+| 1线程 | 30K ops/s | 10K ops/s | 25K ops/s |
+| 10线程 | 20K ops/s | 串行 | **200K ops/s** |
+| 100线程 | 10K ops/s | 串行 | **500K ops/s** |
+
+**SQLite 限制**: 多读者单写者，并发度有限  
+**我们的优势**: MVCC 无锁读，线性扩展
 
 ---
 
-### 方案 5: JOIN 查询性能 (join_query)
-**目的**: 测试多表 JOIN 性能
+### 测试 8: 读写混合 (mixed_workload)
 
-**测试规模**: 100, 1000, 5000 订单，每订单 5 个商品项
+**场景**: 模拟真实应用负载（读多写少）
 
-**SQL 示例**:
+**比例**: 读 90% : 写 10%
+
+**SQL**:
 ```sql
-SELECT o.*, oi.product_name
-FROM orders o
-JOIN order_items oi ON o.id = oi.order_id
-WHERE o.amount > 100;
+-- 90%: 读
+SELECT * FROM users WHERE id = ?;
+
+-- 10%: 写
+BEGIN;
+UPDATE users SET last_login = ? WHERE id = ?;
+COMMIT;
 ```
 
-**关注指标**:
-- JOIN 算法效率（Nested Loop Join）
-- 大表 JOIN 性能
+**目标**:
+| 并发数 | SQLite | 当前 | 目标 |
+|--------|--------|------|------|
+| 10线程 | 5K ops/s | 串行 | **50K ops/s** |
+| 100线程 | 2K ops/s | 串行 | **100K ops/s** |
 
 ---
 
-### 方案 6: 更新性能 (update)
-**目的**: 测试 UPDATE 语句性能
+### 测试 9: 预编译缓存 (prepared_cache)
 
-**测试规模**: 100, 1000, 5000 次更新
+**场景**: 重复执行相同 SQL（测试预编译缓存效果）
 
-**SQL 示例**:
+**SQL**:
 ```sql
-UPDATE inventory SET quantity = quantity + 1 WHERE id = 100;
+-- 重复执行 10000 次
+SELECT * FROM users WHERE id = ?;
 ```
 
-**关注指标**:
-- 单行更新耗时
-- 索引更新开销
+**目标**:
+| 指标 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 首次执行 | 0.5ms | 2ms | <1ms |
+| 缓存命中 | 0.03ms | 0.1ms | <0.03ms |
+| 提升倍数 | 15x | 20x | **>30x** |
 
 ---
 
-### 方案 7: 删除性能 (delete)
-**目的**: 测试 DELETE 语句性能
+### 测试 10: 连接开销 (connection_overhead)
 
-**测试规模**: 删除 10%, 50%, 90% 的数据
+**场景**: 嵌入式数据库通常不需要网络连接，测试重新打开数据库的开销
 
-**SQL 示例**:
-```sql
-DELETE FROM events WHERE id < 5000;
+**方法**:
+- 循环: 打开 → 执行1条查询 → 关闭
+
+**目标**:
+| 指标 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 单次开销 | 1ms | 5ms | <2ms |
+
+---
+
+## 测试执行
+
+### 运行所有测试
+
+```bash
+# 运行基准测试
+cargo bench
+
+# 与 SQLite 对比
+./run_benchmark.sh
+
+# 生成可视化报告
+python3 visualize.py
 ```
 
-**关注指标**:
-- 批量删除效率
-- 数据页回收情况
+### 查看报告
 
----
-
-### 方案 8: 聚合查询性能 (aggregation)
-**目的**: 测试 GROUP BY 和聚合函数性能
-
-**测试规模**: 1000, 10000, 100000 条记录
-
-**SQL 示例**:
-```sql
-SELECT region, COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount)
-FROM sales
-GROUP BY region;
-```
-
-**关注指标**:
-- 分组计算效率
-- 聚合函数性能
-
----
-
-## 预期性能对比
-
-| 操作类型 | SQLite (参考) | 本实现 (预期) | 差距 |
-|---------|--------------|--------------|------|
-| 单条插入 | ~1000 ops/s | ~100-300 ops/s | 3-10x |
-| 批量插入 | ~50000 ops/s | ~10000-20000 ops/s | 2-5x |
-| 索引查询 | ~0.01ms | ~0.1-0.5ms | 10-50x |
-| 全表扫描 | ~10ms/10k rows | ~50-100ms/10k rows | 5-10x |
-| JOIN | ~5ms/1k rows | ~20-50ms/1k rows | 4-10x |
-
----
-
-## 改进方向
-
-根据测试结果，可能的优化方向：
-
-1. **SQL 解析缓存**: 缓存解析后的 AST
-2. **预编译语句**: 支持参数化查询
-3. **连接池**: 减少重复初始化开销
-4. **批量写入优化**: 优化 WAL 写入策略
-5. **索引优化**: B-tree 节点缓存
-6. **查询计划器**: 简单的成本估算
-
----
-
-## 运行测试结果
-
-测试报告生成位置: `target/criterion/`
-
-查看 HTML 报告:
 ```bash
 open target/criterion/report/index.html
+```
+
+---
+
+## 性能目标汇总
+
+### 短期目标 (Phase 1: 3周)
+
+| 场景 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 点查 | 0.03ms | 0.1ms | <0.05ms |
+| 批量插入 | 50K/s | 10K/s | >40K/s |
+| 预编译缓存 | 15x | 5x | >20x |
+
+### 中期目标 (Phase 2: 7周) ⭐
+
+| 场景 | SQLite | 当前 | 目标 |
+|------|--------|------|------|
+| 100线程并发读 | 10K/s | 串行 | **>500K/s** |
+| 读写混合(100线程) | 2K/s | 串行 | **>100K/s** |
+
+### 长期目标 (Phase 3-5: 17周)
+
+| 场景 | SQLite | 目标 |
+|------|--------|------|
+| 单线程全面达标 | 100% | >80% |
+| 并发性能 | 1x | **100x** |
+| 功能完整性 | 100% | >95% |
+
+---
+
+## 附: SQLite 基准测试命令
+
+```bash
+# 创建测试数据
+sqlite3 bench.db "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);"
+
+# 生成测试数据
+sqlite3 bench.db <<EOF
+INSERT INTO users SELECT 
+    value,
+    'User' || value,
+    'user' || value || '@example.com'
+FROM generate_series(1, 100000);
+EOF
+
+# 点查测试
+time sqlite3 bench.db "SELECT * FROM users WHERE id = 50000;"
+
+# 并发测试 (使用多个进程)
+for i in {1..10}; do
+    sqlite3 bench.db "SELECT * FROM users WHERE id = $i;" &
+done
+wait
 ```

@@ -118,6 +118,7 @@ impl Table {
                 data_type,
                 nullable: true,
                 primary_key: false,
+                foreign_key: None,
             });
         }
 
@@ -646,12 +647,14 @@ mod tests {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: true,
+                foreign_key: None,
             },
             ColumnDef {
                 name: "name".to_string(),
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                foreign_key: None,
             },
         ];
 
@@ -677,12 +680,14 @@ mod tests {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: true,
+                foreign_key: None,
             },
             ColumnDef {
                 name: "name".to_string(),
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                foreign_key: None,
             },
         ];
 
@@ -706,12 +711,14 @@ mod tests {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: true,
+                foreign_key: None,
             },
             ColumnDef {
                 name: "name".to_string(),
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                foreign_key: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();

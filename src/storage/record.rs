@@ -8,6 +8,45 @@ pub enum Value {
     Vector(Vec<f32>),
 }
 
+impl Value {
+    /// Serialize a single value to bytes
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut result = Vec::new();
+        match self {
+            Value::Null => {
+                result.push(0);
+            }
+            Value::Integer(n) => {
+                result.push(1);
+                result.extend_from_slice(&n.to_be_bytes());
+            }
+            Value::Real(r) => {
+                result.push(3);
+                result.extend_from_slice(&r.to_be_bytes());
+            }
+            Value::Text(s) => {
+                result.push(2);
+                let bytes = s.as_bytes();
+                result.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                result.extend_from_slice(bytes);
+            }
+            Value::Blob(b) => {
+                result.push(4);
+                result.extend_from_slice(&(b.len() as u32).to_be_bytes());
+                result.extend_from_slice(b);
+            }
+            Value::Vector(v) => {
+                result.push(5);
+                result.extend_from_slice(&(v.len() as u32).to_be_bytes());
+                for x in v {
+                    result.extend_from_slice(&x.to_be_bytes());
+                }
+            }
+        }
+        result
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

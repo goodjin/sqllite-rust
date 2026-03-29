@@ -35,4 +35,6 @@ pub enum StorageError {
     Corrupted(String),
     #[error("Internal error: {0}")]
     Other(String),
+    #[error("Foreign key constraint violation: {detail}")]
+    ForeignKeyViolation { table: String, detail: String },
 }

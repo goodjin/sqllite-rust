@@ -261,6 +261,10 @@ impl RecordHeader {
         (self.flags & Self::FLAG_DELETED) != 0
     }
 
+    pub fn mark_deleted(&mut self) {
+        self.flags |= Self::FLAG_DELETED;
+    }
+
     pub fn has_overflow(&self) -> bool {
         (self.flags & Self::FLAG_OVERFLOW) != 0
     }
@@ -402,9 +406,43 @@ pub trait BtreePageOps {
 
     /// Get all records in the page
     fn get_all_records(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+
+    /// Compare key at slot_idx with target key (for binary search without copying)
+    /// Returns: Ok(Ordering) - comparison result
+    fn compare_key_at(&self, slot_idx: usize, target: &[u8]) -> Result<Ordering>;
 }
 
 impl BtreePageOps for Page {
+    fn compare_key_at(&self, slot_idx: usize, target: &[u8]) -> Result<Ordering> {
+        let header = self.read_header()?;
+        
+        if slot_idx >= header.record_count as usize {
+            return Err(StorageError::KeyNotFound);
+        }
+
+        // Read slot offset
+        let slot_offset = PageHeader::SIZE + slot_idx * 2;
+        let record_offset = u16::from_le_bytes([
+            self.data[slot_offset],
+            self.data[slot_offset + 1]
+        ]) as usize;
+
+        // Read record header
+        let rec_header = RecordHeader::from_bytes(&self.data[record_offset..])?;
+        
+        if rec_header.is_deleted() {
+            // Return error for deleted records so binary search can fall back to linear scan
+            return Err(StorageError::KeyNotFound);
+        }
+
+        // Extract key without copying
+        let key_start = record_offset + RecordHeader::SIZE;
+        let key_end = key_start + rec_header.key_size as usize;
+        let key = &self.data[key_start..key_end];
+
+        Ok(compare_keys(key, target))
+    }
+
     fn read_header(&self) -> Result<PageHeader> {
         PageHeader::from_bytes(&self.data[0..PageHeader::SIZE])
     }
@@ -722,5 +760,195 @@ mod tests {
         let page = pager.get_page(page_id).unwrap();
         let header = page.read_header().unwrap();
         assert_eq!(header.page_type as u8, PageType::Data as u8);
+    }
+
+    #[test]
+    fn test_page_has_space() {
+        let mut page = Page::new(1);
+        let header = PageHeader::new(PageType::Data);
+        page.write_header(&header).unwrap();
+
+        // Empty page should have space
+        assert!(page.has_space(100).unwrap());
+
+        // Fill page with records
+        let large_value = vec![0u8; 2000];
+        for i in 0..10 {
+            let key = format!("key{:04}", i);
+            let result = page.insert_record(key.as_bytes(), &large_value);
+            if result.is_err() {
+                break; // Page full
+            }
+        }
+    }
+
+    #[test]
+    fn test_page_full_insert() {
+        let mut page = Page::new(1);
+        let header = PageHeader::new(PageType::Data);
+        page.write_header(&header).unwrap();
+
+        // Try to insert very large record
+        let huge_key = vec![0u8; 3000];
+        let huge_value = vec![0u8; 3000];
+        let result = page.insert_record(&huge_key, &huge_value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_page_record_ordering() {
+        let mut page = Page::new(1);
+        let header = PageHeader::new(PageType::Data);
+        page.write_header(&header).unwrap();
+
+        // Insert in reverse order
+        page.insert_record(b"key3", b"value3").unwrap();
+        page.insert_record(b"key1", b"value1").unwrap();
+        page.insert_record(b"key2", b"value2").unwrap();
+
+        // Records should be in sorted order
+        let all = page.get_all_records().unwrap();
+        assert_eq!(all[0].0, b"key1");
+        assert_eq!(all[1].0, b"key2");
+        assert_eq!(all[2].0, b"key3");
+    }
+
+    #[test]
+    fn test_page_header_flags() {
+        let mut header = PageHeader::new(PageType::Data);
+        assert!(!header.is_leaf());
+        assert!(!header.is_root());
+
+        header.set_leaf(true);
+        assert!(header.is_leaf());
+
+        header.set_root(true);
+        assert!(header.is_root());
+
+        header.set_leaf(false);
+        assert!(!header.is_leaf());
+    }
+
+    #[test]
+    fn test_record_header_deleted() {
+        let mut header = RecordHeader::new(10, 20);
+        assert!(!header.is_deleted());
+
+        header.mark_deleted();
+        assert!(header.is_deleted());
+    }
+
+    #[test]
+    fn test_page_types() {
+        let data = PageHeader::new(PageType::Data);
+        let index = PageHeader::new(PageType::Index);
+
+        assert_eq!(data.page_type as u8, 0);
+        assert_eq!(index.page_type as u8, 1);
+    }
+
+    #[test]
+    fn test_compare_keys() {
+        assert_eq!(compare_keys(b"a", b"b"), std::cmp::Ordering::Less);
+        assert_eq!(compare_keys(b"b", b"a"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_keys(b"a", b"a"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_keys(b"", b"a"), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn test_binary_search_entries() {
+        let entries = vec![
+            (b"a".to_vec(), b"1".to_vec()),
+            (b"b".to_vec(), b"2".to_vec()),
+            (b"c".to_vec(), b"3".to_vec()),
+            (b"d".to_vec(), b"4".to_vec()),
+        ];
+
+        assert_eq!(binary_search_entries(&entries, b"a").unwrap(), 0);
+        assert_eq!(binary_search_entries(&entries, b"c").unwrap(), 2);
+        assert!(binary_search_entries(&entries, b"z").is_err());
+    }
+
+    // ========================================================================
+    // P8-1: Prefix Compression Integration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_prefix_compression_space_savings() {
+        use crate::storage::prefix_page::{find_common_prefix, compress_keys, decompress_key};
+
+        // Create keys with common prefix (like user IDs)
+        let keys: Vec<Vec<u8>> = (0..100)
+            .map(|i| format!("user:{:08x}:profile:data", i).into_bytes())
+            .collect();
+
+        let prefix = find_common_prefix(&keys);
+        let compressed = compress_keys(&keys, &prefix);
+
+        // Calculate space usage
+        let uncompressed_size: usize = keys.iter().map(|k| k.len()).sum();
+        let compressed_size: usize = compressed.iter().map(|k| k.len()).sum();
+        let total_with_prefix = compressed_size + prefix.len();
+
+        let savings_ratio = (uncompressed_size - total_with_prefix) as f64 / uncompressed_size as f64;
+
+        println!("Prefix: {:?} ({} bytes)", String::from_utf8_lossy(&prefix), prefix.len());
+        println!("Uncompressed: {} bytes", uncompressed_size);
+        println!("Compressed: {} bytes (suffixes: {}, prefix: {})", 
+                 total_with_prefix, compressed_size, prefix.len());
+        println!("Space saved: {:.1}%", savings_ratio * 100.0);
+
+        // Verify compression saves at least 30% space
+        assert!(
+            savings_ratio > 0.30,
+            "Expected >30% space savings, got {:.1}%", 
+            savings_ratio * 100.0
+        );
+
+        // Verify decompress works
+        for (i, suffix) in compressed.iter().enumerate() {
+            let decompressed = decompress_key(suffix, &prefix);
+            assert_eq!(decompressed, keys[i]);
+        }
+    }
+
+    #[test]
+    fn test_prefix_compression_with_url_keys() {
+        use crate::storage::prefix_page::find_common_prefix;
+
+        // Simulate URL keys
+        let urls: Vec<Vec<u8>> = vec![
+            b"https://example.com/path/to/resource1".to_vec(),
+            b"https://example.com/path/to/resource2".to_vec(),
+            b"https://example.com/path/to/resource3".to_vec(),
+            b"https://example.com/path/to/resource4".to_vec(),
+        ];
+
+        let prefix = find_common_prefix(&urls);
+        
+        println!("URL prefix: {:?}", String::from_utf8_lossy(&prefix));
+        
+        // Should find common prefix up to "https://example.com/path/to/resource"
+        assert!(prefix.len() >= 35, "Should find significant common prefix for URLs");
+    }
+
+    #[test]
+    fn test_prefix_compression_timestamp_keys() {
+        use crate::storage::prefix_page::find_common_prefix;
+
+        // Simulate timestamp-based keys
+        let timestamps: Vec<Vec<u8>> = vec![
+            b"2024-01-15T10:30:00Z_event1".to_vec(),
+            b"2024-01-15T10:30:01Z_event2".to_vec(),
+            b"2024-01-15T10:30:02Z_event3".to_vec(),
+            b"2024-01-15T10:30:03Z_event4".to_vec(),
+        ];
+
+        let prefix = find_common_prefix(&timestamps);
+        
+        println!("Timestamp prefix: {:?}", String::from_utf8_lossy(&prefix));
+        
+        // Should find common prefix up to the date/time portion
+        assert!(prefix.len() >= 17, "Should find significant common prefix for timestamps");
     }
 }

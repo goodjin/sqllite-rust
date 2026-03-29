@@ -31,3 +31,11 @@ harness = false
 [[bench]]
 name = "sqllite_rust_bench"
 harness = false
+
+[[bench]]
+name = "prepared_cache_bench"
+harness = false
+
+[[bench]]
+name = "wal_batch_bench"
+harness = false

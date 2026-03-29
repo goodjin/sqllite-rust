@@ -5,6 +5,8 @@ pub type Result<T> = std::result::Result<T, ExecutorError>;
 #[derive(Debug)]
 pub enum ExecutorError {
     Storage(StorageError),
+    /// Alias for Storage for backward compatibility
+    StorageError(StorageError),
     TableNotFound(String),
     ColumnNotFound(String),
     IndexNotFound(String),
@@ -19,6 +21,7 @@ impl std::fmt::Display for ExecutorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExecutorError::Storage(e) => write!(f, "Storage error: {:?}", e),
+            ExecutorError::StorageError(e) => write!(f, "Storage error: {:?}", e),
             ExecutorError::TableNotFound(name) => write!(f, "Table not found: {}", name),
             ExecutorError::ColumnNotFound(name) => write!(f, "Column not found: {}", name),
             ExecutorError::IndexNotFound(name) => write!(f, "Index not found: {}", name),

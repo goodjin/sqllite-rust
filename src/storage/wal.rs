@@ -470,4 +470,102 @@ mod tests {
             assert_eq!(result.unwrap()[0], 42);
         }
     }
+
+    #[test]
+    fn test_wal_multiple_pages() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+
+        let mut wal = Wal::open(&path, 4096).unwrap();
+        wal.begin_transaction();
+
+        // Write multiple pages
+        for i in 1..=10 {
+            let mut page_data = vec![0u8; 4096];
+            page_data[0] = i as u8;
+            let page = Page::from_bytes(i, page_data);
+            wal.write_page(&page).unwrap();
+        }
+
+        wal.flush().unwrap();
+
+        // Read all pages back
+        for i in 1..=10 {
+            let result = wal.read_page(i).unwrap();
+            assert!(result.is_some());
+            assert_eq!(result.unwrap()[0], i as u8);
+        }
+    }
+
+    #[test]
+    fn test_wal_read_nonexistent_page() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+
+        let mut wal = Wal::open(&path, 4096).unwrap();
+        
+        // Try to read page that doesn't exist
+        let result = wal.read_page(999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_wal_checkpoint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wal_path = temp_dir.path().join("test.db");
+        
+        // Create WAL and write some data
+        {
+            let mut wal = Wal::open(wal_path.to_str().unwrap(), 4096).unwrap();
+            wal.begin_transaction();
+
+            let mut page_data = vec![0u8; 4096];
+            page_data[0] = 42;
+            let page = Page::from_bytes(1, page_data);
+            wal.write_page(&page).unwrap();
+            wal.flush().unwrap();
+
+            // Checkpoint should work (even if no main db)
+            let _ = wal.checkpoint(|_page_id, _data| Ok(())); // May fail without main db, but shouldn't panic
+        }
+    }
+
+    #[test]
+    fn test_wal_frame_checksum_verification() {
+        let data = vec![1u8, 2, 3, 4, 5];
+        let mut frame = WalFrame::new(1, 1, data.clone());
+        
+        // Valid frame should verify
+        assert!(frame.verify());
+
+        // Corrupt the data
+        frame.page_data[0] = 99;
+        
+        // Corrupted frame should fail verification
+        assert!(!frame.verify());
+    }
+
+    #[test]
+    fn test_wal_commit_boundary() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+
+        let mut wal = Wal::open(&path, 4096).unwrap();
+        
+        // First transaction
+        wal.begin_transaction();
+        let page = Page::from_bytes(1, vec![1u8; 4096]);
+        wal.write_page(&page).unwrap();
+        wal.flush().unwrap();
+
+        // Second transaction
+        wal.begin_transaction();
+        let page = Page::from_bytes(1, vec![2u8; 4096]);
+        wal.write_page(&page).unwrap();
+        wal.flush().unwrap();
+
+        // Should see latest version
+        let result = wal.read_page(1).unwrap();
+        assert_eq!(result.unwrap()[0], 2);
+    }
 }

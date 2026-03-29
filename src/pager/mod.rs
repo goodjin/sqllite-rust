@@ -2,6 +2,7 @@ pub mod cache;
 pub mod error;
 pub mod header;
 pub mod page;
+pub mod prefetch;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -60,7 +61,7 @@ impl Pager {
             cache: PageCache::new(1000),
             header,
             wal,
-            path: path.to_string(),
+            _path: path.to_string(),
         })
     }
 

@@ -115,18 +115,54 @@ impl BtreeNodeInfo {
     }
 }
 
-/// LRU cache for B-tree nodes
+/// Prefetch configuration for sequential scans
+#[derive(Debug, Clone)]
+pub struct PrefetchConfig {
+    /// Enable prefetch
+    pub enabled: bool,
+    /// Number of pages to prefetch ahead
+    pub distance: usize,
+    /// Track sequential access patterns
+    pub track_sequential: bool,
+}
+
+impl Default for PrefetchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            distance: 4,  // Prefetch 4 pages ahead
+            track_sequential: true,
+        }
+    }
+}
+
+/// Access pattern tracker for prefetch
+#[derive(Debug, Default)]
+struct AccessPattern {
+    last_page_id: Option<PageId>,
+    sequential_count: u32,
+}
+
+/// LRU cache for B-tree nodes with prefetch support
 pub struct BtreeNodeCache {
     nodes: LinkedHashMap<PageId, BtreeNodeInfo>,
     capacity: usize,
     /// Cache hit/miss statistics
     hits: u64,
     misses: u64,
+    /// Prefetch configuration
+    prefetch: PrefetchConfig,
+    /// Access pattern tracking (page_id -> last access pattern)
+    access_patterns: hashlink::LinkedHashMap<PageId, AccessPattern>,
+    /// Pages to prefetch (queue)
+    prefetch_queue: Vec<PageId>,
 }
 
 impl BtreeNodeCache {
     /// Default cache capacity: 1000 nodes (~4MB for typical B-tree)
     pub const DEFAULT_CAPACITY: usize = 1000;
+    /// Max tracked access patterns
+    const MAX_PATTERN_TRACK: usize = 100;
 
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -134,21 +170,46 @@ impl BtreeNodeCache {
             capacity,
             hits: 0,
             misses: 0,
+            prefetch: PrefetchConfig::default(),
+            access_patterns: hashlink::LinkedHashMap::new(),
+            prefetch_queue: Vec::new(),
+        }
+    }
+
+    /// Create with custom prefetch config
+    pub fn with_prefetch(capacity: usize, prefetch: PrefetchConfig) -> Self {
+        Self {
+            nodes: LinkedHashMap::new(),
+            capacity,
+            hits: 0,
+            misses: 0,
+            prefetch,
+            access_patterns: hashlink::LinkedHashMap::new(),
+            prefetch_queue: Vec::new(),
         }
     }
 
     /// Get node info from cache or build from page data
-    pub fn get(&mut self, page_id: PageId, page_data: &[u8]) -> Option<&BtreeNodeInfo> {
+    /// 
+    /// Returns the node info and optionally a list of page IDs to prefetch
+    pub fn get(&mut self, page_id: PageId, page_data: &[u8]) -> (Option<&BtreeNodeInfo>, Vec<PageId>) {
         // Try to get from cache
         if let Some(info) = self.nodes.remove(&page_id) {
             self.hits += 1;
             self.nodes.insert(page_id, info);
-            return self.nodes.get(&page_id);
+            
+            // Track access pattern for prefetch
+            let prefetch_pages = self.track_access_and_prefetch(page_id);
+            
+            return (self.nodes.get(&page_id), prefetch_pages);
         }
 
         // Build from page data
         self.misses += 1;
-        let info = BtreeNodeInfo::from_page(page_id, page_data)?;
+        let info = match BtreeNodeInfo::from_page(page_id, page_data) {
+            Some(info) => info,
+            None => return (None, Vec::new()),
+        };
 
         // Evict if needed
         if self.nodes.len() >= self.capacity {
@@ -156,7 +217,82 @@ impl BtreeNodeCache {
         }
 
         self.nodes.insert(page_id, info);
-        self.nodes.get(&page_id)
+        
+        // Track access pattern
+        let prefetch_pages = self.track_access_and_prefetch(page_id);
+        
+        (self.nodes.get(&page_id), prefetch_pages)
+    }
+
+    /// Track access pattern and determine pages to prefetch
+    fn track_access_and_prefetch(&mut self, page_id: PageId) -> Vec<PageId> {
+        if !self.prefetch.enabled || !self.prefetch.track_sequential {
+            return Vec::new();
+        }
+
+        let mut pages_to_prefetch = Vec::new();
+
+        // Update access pattern
+        let pattern = self.access_patterns.remove(&page_id).unwrap_or_default();
+        
+        // Check if this is sequential access
+        let is_sequential = if let Some(last) = pattern.last_page_id {
+            // Sequential if page_id == last + 1 (forward) or page_id == last - 1 (backward)
+            page_id == last + 1 || page_id == last.saturating_sub(1)
+        } else {
+            false
+        };
+
+        let new_sequential_count = if is_sequential {
+            pattern.sequential_count + 1
+        } else {
+            1
+        };
+
+        // If we have sequential pattern, prefetch ahead
+        if new_sequential_count >= 2 {
+            let direction: i32 = if let Some(last) = pattern.last_page_id {
+                if page_id > last { 1 } else { -1 }
+            } else {
+                1
+            };
+
+            for i in 1..=self.prefetch.distance {
+                let prefetch_id = if direction > 0 {
+                    page_id + i as u32
+                } else {
+                    page_id.saturating_sub(i as u32)
+                };
+                
+                // Only prefetch if not already in cache
+                if !self.nodes.contains_key(&prefetch_id) && !self.prefetch_queue.contains(&prefetch_id) {
+                    pages_to_prefetch.push(prefetch_id);
+                }
+            }
+        }
+
+        // Update pattern
+        let new_pattern = AccessPattern {
+            last_page_id: Some(page_id),
+            sequential_count: new_sequential_count,
+        };
+
+        // Limit tracked patterns
+        if self.access_patterns.len() >= Self::MAX_PATTERN_TRACK {
+            if let Some((oldest_id, _)) = self.access_patterns.front() {
+                let id = *oldest_id;
+                self.access_patterns.remove(&id);
+            }
+        }
+
+        self.access_patterns.insert(page_id, new_pattern);
+        
+        pages_to_prefetch
+    }
+
+    /// Mark pages as prefetched (call after prefetching)
+    pub fn mark_prefetched(&mut self, page_id: PageId) {
+        self.prefetch_queue.retain(|&id| id != page_id);
     }
 
     /// Get mutable reference to node info
@@ -210,7 +346,20 @@ impl BtreeNodeCache {
             hits: self.hits,
             misses: self.misses,
             hit_rate,
+            prefetch_enabled: self.prefetch.enabled,
+            prefetch_queue_size: self.prefetch_queue.len(),
+            tracked_patterns: self.access_patterns.len(),
         }
+    }
+
+    /// Enable/disable prefetch
+    pub fn set_prefetch_enabled(&mut self, enabled: bool) {
+        self.prefetch.enabled = enabled;
+    }
+
+    /// Set prefetch distance
+    pub fn set_prefetch_distance(&mut self, distance: usize) {
+        self.prefetch.distance = distance;
     }
 
     /// Get all dirty nodes
@@ -230,14 +379,18 @@ pub struct BtreeCacheStats {
     pub hits: u64,
     pub misses: u64,
     pub hit_rate: f64,
+    pub prefetch_enabled: bool,
+    pub prefetch_queue_size: usize,
+    pub tracked_patterns: usize,
 }
 
 impl std::fmt::Display for BtreeCacheStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "B-tree Cache: {}/{} nodes, {:.1}% hit rate ({} hits, {} misses)",
-            self.size, self.capacity, self.hit_rate, self.hits, self.misses
+            "B-tree Cache: {}/{} nodes, {:.1}% hit rate ({} hits, {} misses), prefetch={}",
+            self.size, self.capacity, self.hit_rate, self.hits, self.misses, 
+            if self.prefetch_enabled { "on" } else { "off" }
         )
     }
 }
@@ -297,13 +450,15 @@ mod tests {
         page.insert_record(b"key", b"value").unwrap();
 
         // First access - cache miss
-        let info1 = cache.get(1, page.as_slice());
+        let (info1, prefetch) = cache.get(1, page.as_slice());
         assert!(info1.is_some());
+        assert!(prefetch.is_empty()); // No sequential pattern yet
         assert_eq!(cache.stats().misses, 1);
 
         // Second access - cache hit
-        let info2 = cache.get(1, page.as_slice());
+        let (info2, prefetch) = cache.get(1, page.as_slice());
         assert!(info2.is_some());
+        assert!(prefetch.is_empty());
         assert_eq!(cache.stats().hits, 1);
 
         // Invalidate
@@ -337,5 +492,27 @@ mod tests {
         assert_eq!(cache.stats().size, 2);
         // Page 1 should be evicted (LRU)
         assert!(cache.nodes.get(&1).is_none());
+    }
+
+    #[test]
+    fn test_prefetch_config() {
+        // Test that prefetch configuration works
+        let cache = BtreeNodeCache::with_prefetch(10, PrefetchConfig {
+            enabled: true,
+            distance: 4,
+            track_sequential: true,
+        });
+
+        let stats = cache.stats();
+        assert!(stats.prefetch_enabled);
+        assert_eq!(stats.tracked_patterns, 0);
+        
+        // Test disabling prefetch
+        let mut cache2 = BtreeNodeCache::new(10);
+        cache2.set_prefetch_enabled(false);
+        cache2.set_prefetch_distance(8);
+        
+        let stats2 = cache2.stats();
+        assert!(!stats2.prefetch_enabled);
     }
 }

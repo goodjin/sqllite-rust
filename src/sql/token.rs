@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Select, Insert, Update, Delete,
-    Create, Drop, Table, Index,
+    Create, Drop, Table, Index, View,
     From, Where, Set, Values,
     Into, On,
     And, Or, Not, Null, True, False,
@@ -13,6 +13,17 @@ pub enum Token {
     Join, Inner, Left,
     Group, Having,
     Using, Unique,
+    // Subquery keywords
+    Exists, In,
+    // Foreign key tokens
+    Foreign, References, Cascade, Restrict, Default,
+    Action, No, Deferrable, Deferred, Immediate,
+    // ALTER TABLE keywords
+    Alter, Add, Column, Rename, To,
+    // View keywords
+    As, If,
+    // CTE keywords
+    With, Recursive,
     Identifier(String),
     StringLiteral(String),
     NumberLiteral(i64),
