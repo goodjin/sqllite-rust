@@ -9,6 +9,11 @@ pub enum Value {
 }
 
 impl Value {
+    /// Check if value is NULL
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+
     /// Serialize a single value to bytes
     pub fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
