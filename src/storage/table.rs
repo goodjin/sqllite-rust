@@ -57,6 +57,7 @@ impl Table {
                 DataType::Integer => data.push(1),
                 DataType::Text => data.push(2),
                 DataType::Blob => data.push(4),
+                DataType::Json => data.push(6),
                 DataType::Vector(dim) => {
                     data.push(5);
                     data.extend_from_slice(&dim.to_be_bytes());
@@ -119,6 +120,10 @@ impl Table {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
+
             });
         }
 
@@ -648,6 +653,10 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
+
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -655,6 +664,10 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
+
             },
         ];
 
@@ -681,6 +694,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -688,6 +704,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
 
@@ -712,6 +731,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -719,6 +741,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();

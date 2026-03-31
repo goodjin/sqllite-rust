@@ -1,0 +1,49 @@
+{
+  "test_date": "2026-03-30 00:48:33",
+  "commit_hash": "abb37d2",
+  "avg_ratio": 1.15375,
+  "sqlite_80_target_met": 6,
+  "total_tests": 8,
+  "results": [
+    {
+      "name": "点查 (索引)",
+      "ratio": 0.88,
+      "grade": "green"
+    },
+    {
+      "name": "范围查询 (索引)",
+      "ratio": 1.07,
+      "grade": "blue"
+    },
+    {
+      "name": "覆盖索引扫描",
+      "ratio": 1.07,
+      "grade": "blue"
+    },
+    {
+      "name": "批量插入",
+      "ratio": 1.42,
+      "grade": "orange"
+    },
+    {
+      "name": "聚合查询",
+      "ratio": 1.13,
+      "grade": "blue"
+    },
+    {
+      "name": "全表扫描",
+      "ratio": 1.32,
+      "grade": "orange"
+    },
+    {
+      "name": "JOIN查询",
+      "ratio": 1.14,
+      "grade": "blue"
+    },
+    {
+      "name": "COUNT(*)",
+      "ratio": 1.2,
+      "grade": "blue"
+    }
+  ]
+}

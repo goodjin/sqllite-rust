@@ -136,8 +136,8 @@ pub struct PageCacheMeta {
     pub last_access: u64,
     /// Reference to page data (pointer or offset)
     pub data_ptr: usize,
-    /// Padding to 64 bytes
-    _padding: [u8; 40],
+    /// Padding to 64 bytes (actual size is 68, align rounds to 128)
+    _padding: [u8; 36],
 }
 
 impl PageCacheMeta {
@@ -148,7 +148,7 @@ impl PageCacheMeta {
             flags: 0,
             last_access: 0,
             data_ptr,
-            _padding: [0; 40],
+            _padding: [0; 36],
         }
     }
     

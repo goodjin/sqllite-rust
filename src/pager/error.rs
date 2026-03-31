@@ -19,6 +19,18 @@ pub enum PagerError {
 
     #[error("WAL error: {0}")]
     WalError(String),
+
+    /// P3-6: Page checksum verification failed
+    #[error("Page {page_id} checksum mismatch: stored={stored_checksum:08X}, calculated={calculated_checksum:08X}")]
+    CorruptedPage {
+        page_id: u32,
+        stored_checksum: u32,
+        calculated_checksum: u32,
+    },
+
+    /// P3-6: General corruption error
+    #[error("Corruption detected: {0}")]
+    Corrupted(String),
 }
 
 impl From<crate::storage::StorageError> for PagerError {

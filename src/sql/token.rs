@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Select, Insert, Update, Delete,
-    Create, Drop, Table, Index, View,
+    Create, Drop, Table, Index, View, Trigger,
     From, Where, Set, Values,
     Into, On,
     And, Or, Not, Null, True, False,
@@ -24,6 +24,24 @@ pub enum Token {
     As, If,
     // CTE keywords
     With, Recursive,
+    // Trigger keywords
+    Before, After, Instead, Of, For, Each, Row, 
+    When, Then, End, New, Old,
+    // Window function keywords
+    Over, Partition, Range, Rows, Between, Unbounded, Preceding, Following, Current, 
+    RowNumber, Rank, DenseRank, Lead, Lag, FirstValue, LastValue, NthValue,
+    // Virtual table keywords
+    Virtual, Fts5, Rtree,
+    // JSON keywords
+    Json, JsonArray, JsonObject, JsonExtract, JsonType,
+    // Match operator for FTS
+    Match,
+    // Check option
+    Check, Option,
+    // Generated columns
+    Generated, Always,
+    // Others
+    Dot,  // For json path like '$.name'
     Identifier(String),
     StringLiteral(String),
     NumberLiteral(i64),

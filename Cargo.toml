@@ -19,13 +19,24 @@ rustyline = "14.0"
 hashlink = "0.9"
 regex = "1.10"
 rand = "0.8"
+crossbeam-epoch = "0.9"
+crossbeam-utils = "0.8"
+parking_lot = "0.12"
+hashbrown = "0.14"
+lazy_static = "1.4"
 
 [dev-dependencies]
 tempfile = "3.0"
 criterion = "0.5"
+chrono = "0.4"
+proptest = "1.0"
 
 [[bench]]
 name = "sqlite_comparison"
+harness = false
+
+[[bench]]
+name = "sqlite_comparison_bench"
 harness = false
 
 [[bench]]
@@ -38,4 +49,16 @@ harness = false
 
 [[bench]]
 name = "wal_batch_bench"
+harness = false
+
+[[bench]]
+name = "generate_report"
+harness = false
+
+[[bench]]
+name = "concurrent_stress_bench"
+harness = false
+
+[[bench]]
+name = "generate_concurrent_report"
 harness = false

@@ -265,6 +265,7 @@ fn replace_statement_placeholders(stmt: &Statement, params: &[Expression]) -> St
             values: ins.values.iter().map(|row| {
                 row.iter().map(|expr| replace_placeholders(expr, params)).collect()
             }).collect(),
+            ctes: ins.ctes.clone(),
         }),
         Statement::Select(sel) => Statement::Select(crate::sql::ast::SelectStmt {
             ctes: sel.ctes.clone(),
@@ -282,10 +283,12 @@ fn replace_statement_placeholders(stmt: &Statement, params: &[Expression]) -> St
             table: upd.table.clone(),
             set_clauses: upd.set_clauses.clone(),
             where_clause: upd.where_clause.as_ref().map(|expr| replace_placeholders(expr, params)),
+            ctes: upd.ctes.clone(),
         }),
         Statement::Delete(del) => Statement::Delete(crate::sql::ast::DeleteStmt {
             table: del.table.clone(),
             where_clause: del.where_clause.as_ref().map(|expr| replace_placeholders(expr, params)),
+            ctes: del.ctes.clone(),
         }),
         other => other.clone(),
     }

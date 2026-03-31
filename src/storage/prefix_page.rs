@@ -2,6 +2,12 @@
 //!
 //! This module integrates prefix compression with B-tree pages.
 //! Each page stores a common prefix in the header, and records store only the suffix.
+//!
+//! # Phase 3 Enhancements (P3-1)
+//! - Adaptive compression decision based on key distribution
+//! - Runtime compression statistics monitoring
+//! - Performance comparison and auto-tuning
+//! - Default enabled with optimized parameters
 
 use crate::pager::PageId;
 use crate::pager::page::PAGE_SIZE;
@@ -11,6 +17,7 @@ use crate::storage::btree_engine::{
     PageHeader, PageType, BtreePageOps, compare_keys,
 };
 use std::cmp::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// Extended page header for prefix compression (128 bytes total)
 /// 
@@ -34,6 +41,7 @@ impl PrefixPageHeader {
     
     // Flags2 bits
     pub const FLAG_PREFIX_COMPRESSION: u8 = 0x01;
+    pub const FLAG_ADAPTIVE_COMPRESSION: u8 = 0x02;  // P3-1: Adaptive mode
     
     pub fn new(page_type: PageType) -> Self {
         Self {
@@ -54,6 +62,18 @@ impl PrefixPageHeader {
             self.flags2 |= Self::FLAG_PREFIX_COMPRESSION;
         } else {
             self.flags2 &= !Self::FLAG_PREFIX_COMPRESSION;
+        }
+    }
+
+    pub fn is_adaptive_compression(&self) -> bool {
+        (self.flags2 & Self::FLAG_ADAPTIVE_COMPRESSION) != 0
+    }
+
+    pub fn set_adaptive_compression(&mut self, enabled: bool) {
+        if enabled {
+            self.flags2 |= Self::FLAG_ADAPTIVE_COMPRESSION;
+        } else {
+            self.flags2 &= !Self::FLAG_ADAPTIVE_COMPRESSION;
         }
     }
     
@@ -228,18 +248,121 @@ pub fn decompress_key(suffix: &[u8], prefix: &[u8]) -> Vec<u8> {
     result
 }
 
-/// B-tree configuration for prefix compression
+/// Key distribution analysis for adaptive compression (P3-1)
+#[derive(Debug, Clone)]
+pub struct KeyDistribution {
+    pub avg_key_len: f64,
+    pub prefix_ratio: f64,
+    pub key_variance: f64,
+    pub record_count: usize,
+    /// Score from 0.0 to 1.0 indicating compression benefit
+    pub compression_score: f64,
+}
+
+impl KeyDistribution {
+    /// Analyze key distribution to determine compression benefit
+    pub fn analyze(keys: &[Vec<u8>]) -> Self {
+        if keys.is_empty() {
+            return Self {
+                avg_key_len: 0.0,
+                prefix_ratio: 0.0,
+                key_variance: 0.0,
+                record_count: 0,
+                compression_score: 0.0,
+            };
+        }
+
+        let prefix = find_common_prefix(keys);
+        let prefix_len = prefix.len();
+        
+        // Calculate average key length
+        let total_len: usize = keys.iter().map(|k| k.len()).sum();
+        let avg_key_len = total_len as f64 / keys.len() as f64;
+        
+        // Calculate prefix ratio
+        let prefix_ratio = if avg_key_len > 0.0 {
+            prefix_len as f64 / avg_key_len
+        } else {
+            0.0
+        };
+
+        // Calculate key length variance
+        let variance_sum: f64 = keys.iter()
+            .map(|k| {
+                let diff = k.len() as f64 - avg_key_len;
+                diff * diff
+            })
+            .sum();
+        let key_variance = if keys.len() > 1 {
+            variance_sum / (keys.len() - 1) as f64
+        } else {
+            0.0
+        };
+
+        // Calculate compression score
+        // Higher score = better compression benefit
+        // Factors: prefix ratio, number of records, average key length
+        let record_factor = (keys.len() as f64).min(100.0) / 100.0; // Max at 100 records
+        let length_factor = (avg_key_len / 100.0).min(1.0); // Longer keys benefit more
+        
+        let compression_score = if prefix_ratio >= 0.2 && prefix_len >= 4 {
+            // Good prefix, calculate score
+            let base_score = prefix_ratio * 0.6 + record_factor * 0.3 + length_factor * 0.1;
+            // Penalty for high variance (unpredictable keys)
+            let variance_penalty = (key_variance / 1000.0).min(0.2);
+            (base_score - variance_penalty).max(0.0)
+        } else {
+            0.0
+        };
+
+        Self {
+            avg_key_len,
+            prefix_ratio,
+            key_variance,
+            record_count: keys.len(),
+            compression_score,
+        }
+    }
+
+    /// Determine if compression should be enabled based on analysis
+    pub fn should_compress(&self, config: &BtreeConfig) -> bool {
+        if !config.enable_prefix_compression {
+            return false;
+        }
+
+        // Adaptive decision based on compression score
+        self.compression_score >= config.min_compression_score
+            && self.prefix_ratio >= config.min_prefix_ratio
+            && self.record_count >= config.min_records_for_compression
+    }
+}
+
+/// B-tree configuration for prefix compression (P3-1 Enhanced)
 #[derive(Debug, Clone, Copy)]
 pub struct BtreeConfig {
+    /// Enable prefix compression globally
     pub enable_prefix_compression: bool,
-    pub min_prefix_ratio: f64,  // Minimum ratio of prefix to key length to enable compression
+    /// Minimum ratio of prefix to key length to enable compression
+    pub min_prefix_ratio: f64,
+    /// Minimum compression score (0.0-1.0) to enable adaptive compression
+    pub min_compression_score: f64,
+    /// Minimum records before considering compression
+    pub min_records_for_compression: usize,
+    /// Enable adaptive compression based on key distribution
+    pub adaptive_compression: bool,
+    /// Target compression ratio (for monitoring)
+    pub target_compression_ratio: f64,
 }
 
 impl Default for BtreeConfig {
     fn default() -> Self {
         Self {
-            enable_prefix_compression: false, // Disabled by default until tested
-            min_prefix_ratio: 0.3,            // At least 30% common prefix
+            enable_prefix_compression: true,  // P3-1: Default enabled
+            min_prefix_ratio: 0.25,           // At least 25% common prefix
+            min_compression_score: 0.3,       // Minimum benefit threshold
+            min_records_for_compression: 3,   // Need at least 3 records
+            adaptive_compression: true,       // P3-1: Adaptive enabled by default
+            target_compression_ratio: 1.3,    // Target 30% space savings
         }
     }
 }
@@ -249,6 +372,134 @@ impl BtreeConfig {
         self.enable_prefix_compression = enabled;
         self
     }
+
+    pub fn with_adaptive_compression(mut self, enabled: bool) -> Self {
+        self.adaptive_compression = enabled;
+        self
+    }
+
+    /// Conservative settings for memory-constrained environments
+    pub fn conservative() -> Self {
+        Self {
+            enable_prefix_compression: true,
+            min_prefix_ratio: 0.35,
+            min_compression_score: 0.4,
+            min_records_for_compression: 5,
+            adaptive_compression: true,
+            target_compression_ratio: 1.4,
+        }
+    }
+
+    /// Aggressive compression for maximum space savings
+    pub fn aggressive() -> Self {
+        Self {
+            enable_prefix_compression: true,
+            min_prefix_ratio: 0.15,
+            min_compression_score: 0.2,
+            min_records_for_compression: 2,
+            adaptive_compression: true,
+            target_compression_ratio: 1.2,
+        }
+    }
+
+    /// Disable all compression
+    pub fn disabled() -> Self {
+        Self {
+            enable_prefix_compression: false,
+            ..Self::default()
+        }
+    }
+}
+
+/// Statistics for prefix compression (P3-1 Enhanced with monitoring)
+#[derive(Debug, Clone)]
+pub struct PrefixCompressionStats {
+    pub enabled: bool,
+    pub prefix_len: usize,
+    pub record_count: usize,
+    pub uncompressed_size: usize,
+    pub compressed_size: usize,
+    pub space_saved: usize,
+    pub compression_ratio: f64,
+    /// P3-1: Key distribution analysis
+    pub key_distribution: Option<KeyDistribution>,
+    /// P3-1: Whether compression was enabled by adaptive decision
+    pub adaptive_decision: bool,
+}
+
+/// Global compression statistics for runtime monitoring (P3-1)
+#[derive(Debug, Default)]
+pub struct GlobalCompressionStats {
+    pub pages_compressed: AtomicU64,
+    pub pages_uncompressed: AtomicU64,
+    pub total_space_saved: AtomicU64,
+    pub total_uncompressed_size: AtomicU64,
+    pub total_compressed_size: AtomicU64,
+    pub adaptive_enabled_count: AtomicU64,
+    pub adaptive_disabled_count: AtomicU64,
+}
+
+impl GlobalCompressionStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_compression(&self, stats: &PrefixCompressionStats) {
+        if stats.enabled {
+            self.pages_compressed.fetch_add(1, AtomicOrdering::Relaxed);
+            self.total_space_saved.fetch_add(stats.space_saved as u64, AtomicOrdering::Relaxed);
+            if stats.adaptive_decision {
+                self.adaptive_enabled_count.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        } else {
+            self.pages_uncompressed.fetch_add(1, AtomicOrdering::Relaxed);
+            if stats.adaptive_decision {
+                self.adaptive_disabled_count.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        }
+        self.total_uncompressed_size.fetch_add(stats.uncompressed_size as u64, AtomicOrdering::Relaxed);
+        self.total_compressed_size.fetch_add(stats.compressed_size as u64, AtomicOrdering::Relaxed);
+    }
+
+    pub fn global_compression_ratio(&self) -> f64 {
+        let uncompressed = self.total_uncompressed_size.load(AtomicOrdering::Relaxed);
+        let compressed = self.total_compressed_size.load(AtomicOrdering::Relaxed);
+        
+        if compressed == 0 {
+            1.0
+        } else {
+            uncompressed as f64 / compressed.max(1) as f64
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        let compressed = self.pages_compressed.load(AtomicOrdering::Relaxed);
+        let uncompressed = self.pages_uncompressed.load(AtomicOrdering::Relaxed);
+        let total = compressed + uncompressed;
+        let space_saved = self.total_space_saved.load(AtomicOrdering::Relaxed);
+        let ratio = self.global_compression_ratio();
+        let adaptive_enabled = self.adaptive_enabled_count.load(AtomicOrdering::Relaxed);
+        let adaptive_disabled = self.adaptive_disabled_count.load(AtomicOrdering::Relaxed);
+
+        format!(
+            "Compression Stats: {} pages compressed, {} uncompressed ({}% compressed)\n\
+             Space saved: {} bytes\n\
+             Global compression ratio: {:.2}x\n\
+             Adaptive decisions: {} enabled, {} disabled",
+            compressed,
+            uncompressed,
+            if total > 0 { (compressed * 100 / total) } else { 0 },
+            space_saved,
+            ratio,
+            adaptive_enabled,
+            adaptive_disabled
+        )
+    }
+}
+
+// Global stats instance
+lazy_static::lazy_static! {
+    pub static ref GLOBAL_COMPRESSION_STATS: GlobalCompressionStats = GlobalCompressionStats::new();
 }
 
 /// Trait for prefix compression page operations
@@ -270,18 +521,9 @@ pub trait PrefixCompressionOps {
     
     /// Calculate space savings from compression
     fn calculate_compression_stats(&self) -> Result<PrefixCompressionStats>;
-}
 
-/// Statistics for prefix compression
-#[derive(Debug, Clone)]
-pub struct PrefixCompressionStats {
-    pub enabled: bool,
-    pub prefix_len: usize,
-    pub record_count: usize,
-    pub uncompressed_size: usize,
-    pub compressed_size: usize,
-    pub space_saved: usize,
-    pub compression_ratio: f64,
+    /// P3-1: Enable adaptive compression based on key distribution analysis
+    fn enable_adaptive_compression(&mut self, keys: &[Vec<u8>], config: &BtreeConfig) -> Result<bool>;
 }
 
 impl PrefixCompressionOps for Page {
@@ -319,6 +561,56 @@ impl PrefixCompressionOps for Page {
         self.data[0..PrefixPageHeader::SIZE].copy_from_slice(&ext_header.to_bytes());
         
         Ok(())
+    }
+
+    fn enable_adaptive_compression(&mut self, keys: &[Vec<u8>], config: &BtreeConfig) -> Result<bool> {
+        if keys.len() < config.min_records_for_compression {
+            return Ok(false);
+        }
+
+        // Analyze key distribution
+        let distribution = KeyDistribution::analyze(keys);
+        
+        // Make adaptive decision
+        let should_compress = distribution.should_compress(config);
+        
+        if should_compress {
+            self.enable_prefix_compression(keys)?;
+        }
+
+        // Record stats
+        let stats = PrefixCompressionStats {
+            enabled: should_compress,
+            prefix_len: if should_compress { find_common_prefix(keys).len() } else { 0 },
+            record_count: keys.len(),
+            uncompressed_size: keys.iter().map(|k| k.len()).sum(),
+            compressed_size: if should_compress {
+                let prefix = find_common_prefix(keys);
+                keys.iter().map(|k| k.len() - prefix.len().min(k.len())).sum::<usize>() + prefix.len() + PrefixPageHeader::SIZE
+            } else {
+                keys.iter().map(|k| k.len()).sum()
+            },
+            space_saved: if should_compress {
+                let prefix = find_common_prefix(keys);
+                keys.len() * prefix.len()
+            } else {
+                0
+            },
+            compression_ratio: if should_compress {
+                let prefix = find_common_prefix(keys);
+                let uncompressed: usize = keys.iter().map(|k| k.len()).sum();
+                let compressed: usize = keys.iter().map(|k| k.len() - prefix.len().min(k.len())).sum::<usize>() + prefix.len();
+                uncompressed as f64 / compressed.max(1) as f64
+            } else {
+                1.0
+            },
+            key_distribution: Some(distribution.clone()),
+            adaptive_decision: true,
+        };
+
+        GLOBAL_COMPRESSION_STATS.record_compression(&stats);
+        
+        Ok(should_compress)
     }
     
     fn is_prefix_compression_enabled(&self) -> Result<bool> {
@@ -471,6 +763,8 @@ impl PrefixCompressionOps for Page {
                 compressed_size: 0,
                 space_saved: 0,
                 compression_ratio: 1.0,
+                key_distribution: None,
+                adaptive_decision: false,
             });
         }
         
@@ -497,6 +791,8 @@ impl PrefixCompressionOps for Page {
             compressed_size,
             space_saved,
             compression_ratio,
+            key_distribution: None,
+            adaptive_decision: false,
         })
     }
 }
@@ -514,8 +810,16 @@ pub fn compress_page(page: &mut Page, config: &BtreeConfig) -> Result<bool> {
     
     // Get all existing records
     let records = page.get_all_records()?;
-    if records.len() < 2 {
+    if records.len() < config.min_records_for_compression {
         return Ok(false); // Not enough records to justify compression
+    }
+    
+    // Use adaptive compression if enabled
+    if config.adaptive_compression {
+        return page.enable_adaptive_compression(
+            &records.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            config
+        );
     }
     
     // Extract keys
@@ -550,6 +854,22 @@ pub fn compress_page(page: &mut Page, config: &BtreeConfig) -> Result<bool> {
     }
     
     Ok(true)
+}
+
+/// Get global compression statistics summary (P3-1)
+pub fn get_compression_stats_summary() -> String {
+    GLOBAL_COMPRESSION_STATS.summary()
+}
+
+/// Reset global compression statistics (P3-1)
+pub fn reset_compression_stats() {
+    GLOBAL_COMPRESSION_STATS.pages_compressed.store(0, AtomicOrdering::Relaxed);
+    GLOBAL_COMPRESSION_STATS.pages_uncompressed.store(0, AtomicOrdering::Relaxed);
+    GLOBAL_COMPRESSION_STATS.total_space_saved.store(0, AtomicOrdering::Relaxed);
+    GLOBAL_COMPRESSION_STATS.total_uncompressed_size.store(0, AtomicOrdering::Relaxed);
+    GLOBAL_COMPRESSION_STATS.total_compressed_size.store(0, AtomicOrdering::Relaxed);
+    GLOBAL_COMPRESSION_STATS.adaptive_enabled_count.store(0, AtomicOrdering::Relaxed);
+    GLOBAL_COMPRESSION_STATS.adaptive_disabled_count.store(0, AtomicOrdering::Relaxed);
 }
 
 #[cfg(test)]
@@ -687,5 +1007,115 @@ mod tests {
         assert!(stats.compression_ratio > 1.0);
         
         println!("Stats: {:?}", stats);
+    }
+
+    // P3-1: New tests for adaptive compression
+    #[test]
+    fn test_key_distribution_analysis() {
+        // Keys with good common prefix
+        let good_keys: Vec<Vec<u8>> = (0..50)
+            .map(|i| format!("user:{:08x}:profile", i).into_bytes())
+            .collect();
+
+        let distribution = KeyDistribution::analyze(&good_keys);
+        
+        println!("Good keys distribution: {:?}", distribution);
+        
+        assert!(distribution.prefix_ratio >= 0.5, "Should have high prefix ratio");
+        assert!(distribution.compression_score > 0.3, "Should have good compression score");
+        
+        // Keys with no common prefix
+        let bad_keys: Vec<Vec<u8>> = vec![
+            b"alice".to_vec(),
+            b"bob".to_vec(),
+            b"charlie".to_vec(),
+        ];
+
+        let bad_distribution = KeyDistribution::analyze(&bad_keys);
+        
+        println!("Bad keys distribution: {:?}", bad_distribution);
+        
+        assert_eq!(bad_distribution.prefix_ratio, 0.0);
+        assert_eq!(bad_distribution.compression_score, 0.0);
+    }
+
+    #[test]
+    fn test_adaptive_compression_decision() {
+        let mut page = Page::new(1);
+        let header = PageHeader::new(PageType::Data);
+        page.write_header(&header).unwrap();
+
+        // Insert records with good common prefix
+        let good_keys: Vec<Vec<u8>> = (0..20)
+            .map(|i| format!("user:{:08x}:data", i).into_bytes())
+            .collect();
+
+        let config = BtreeConfig::default();
+        
+        // Should enable compression for good keys
+        let result = page.enable_adaptive_compression(&good_keys, &config).unwrap();
+        assert!(result, "Should enable compression for keys with common prefix");
+        assert!(page.is_prefix_compression_enabled().unwrap());
+
+        // Reset page
+        let mut page2 = Page::new(2);
+        page2.write_header(&header).unwrap();
+
+        // Insert records with no common prefix
+        let bad_keys: Vec<Vec<u8>> = vec![
+            b"alice".to_vec(),
+            b"bob".to_vec(),
+            b"charlie".to_vec(),
+        ];
+
+        // Should not enable compression
+        let result2 = page2.enable_adaptive_compression(&bad_keys, &config).unwrap();
+        assert!(!result2, "Should not enable compression for keys without common prefix");
+        assert!(!page2.is_prefix_compression_enabled().unwrap());
+    }
+
+    #[test]
+    fn test_btree_config_presets() {
+        let default = BtreeConfig::default();
+        assert!(default.enable_prefix_compression);
+        assert!(default.adaptive_compression);
+        
+        let conservative = BtreeConfig::conservative();
+        assert!(conservative.enable_prefix_compression);
+        assert!(conservative.min_prefix_ratio > default.min_prefix_ratio);
+        
+        let aggressive = BtreeConfig::aggressive();
+        assert!(aggressive.enable_prefix_compression);
+        assert!(aggressive.min_prefix_ratio < default.min_prefix_ratio);
+        
+        let disabled = BtreeConfig::disabled();
+        assert!(!disabled.enable_prefix_compression);
+    }
+
+    #[test]
+    fn test_global_compression_stats() {
+        // Reset stats first
+        reset_compression_stats();
+        
+        let stats = PrefixCompressionStats {
+            enabled: true,
+            prefix_len: 10,
+            record_count: 100,
+            uncompressed_size: 1000,
+            compressed_size: 700,
+            space_saved: 300,
+            compression_ratio: 1.43,
+            key_distribution: None,
+            adaptive_decision: true,
+        };
+        
+        GLOBAL_COMPRESSION_STATS.record_compression(&stats);
+        
+        assert_eq!(GLOBAL_COMPRESSION_STATS.pages_compressed.load(AtomicOrdering::Relaxed), 1);
+        assert_eq!(GLOBAL_COMPRESSION_STATS.total_space_saved.load(AtomicOrdering::Relaxed), 300);
+        
+        let summary = get_compression_stats_summary();
+        assert!(summary.contains("1 pages compressed"));
+        assert!(summary.contains("300 bytes"));
     }
 }

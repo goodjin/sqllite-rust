@@ -1,0 +1,248 @@
+name: Fuzz Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz-quick:
+    name: Quick Fuzz Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@nightly
+    
+    - name: Install cargo-fuzz
+      run: cargo install cargo-fuzz
+    
+    - name: Cache fuzz corpus
+      uses: actions/cache@v3
+      with:
+        path: |
+          fuzz/corpus
+          fuzz/artifacts
+        key: fuzz-corpus-${{ github.sha }}
+        restore-keys: |
+          fuzz-corpus-
+    
+    - name: Generate corpus
+      run: |
+        cd fuzz
+        python3 generate_corpus.py
+    
+    - name: Build fuzz targets
+      run: |
+        cd fuzz
+        cargo build --release
+    
+    - name: Fuzz SQL Parser (2 min)
+      run: |
+        cd fuzz
+        cargo fuzz run sql_parser_fuzz -- -max_total_time=120 -print_final_stats=1
+    
+    - name: Fuzz Storage (2 min)
+      run: |
+        cd fuzz
+        cargo fuzz run storage_fuzz -- -max_total_time=120 -print_final_stats=1
+    
+    - name: Fuzz MVCC (2 min)
+      run: |
+        cd fuzz
+        cargo fuzz run mvcc_fuzz -- -max_total_time=120 -print_final_stats=1
+    
+    - name: Fuzz Transaction (2 min)
+      run: |
+        cd fuzz
+        cargo fuzz run transaction_fuzz -- -max_total_time=120 -print_final_stats=1
+    
+    - name: Upload crash artifacts
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-crashes-quick
+        path: fuzz/artifacts/
+        if-no-files-found: ignore
+
+  fuzz-extended:
+    name: Extended Fuzz Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[fuzz-extended]')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@nightly
+    
+    - name: Install cargo-fuzz
+      run: cargo install cargo-fuzz
+    
+    - name: Cache fuzz corpus
+      uses: actions/cache@v3
+      with:
+        path: |
+          fuzz/corpus
+          fuzz/artifacts
+        key: fuzz-corpus-extended-${{ github.sha }}
+        restore-keys: |
+          fuzz-corpus-extended-
+          fuzz-corpus-
+    
+    - name: Generate corpus
+      run: |
+        cd fuzz
+        python3 generate_corpus.py
+    
+    - name: Build fuzz targets
+      run: |
+        cd fuzz
+        cargo build --release
+    
+    - name: Fuzz SQL Parser (15 min)
+      run: |
+        cd fuzz
+        cargo fuzz run sql_parser_fuzz -- -max_total_time=900 -print_final_stats=1
+    
+    - name: Fuzz Storage (15 min)
+      run: |
+        cd fuzz
+        cargo fuzz run storage_fuzz -- -max_total_time=900 -print_final_stats=1
+    
+    - name: Fuzz MVCC (15 min)
+      run: |
+        cd fuzz
+        cargo fuzz run mvcc_fuzz -- -max_total_time=900 -print_final_stats=1
+    
+    - name: Fuzz Transaction (15 min)
+      run: |
+        cd fuzz
+        cargo fuzz run transaction_fuzz -- -max_total_time=900 -print_final_stats=1
+    
+    - name: Fuzz BTree (15 min)
+      run: |
+        cd fuzz
+        cargo fuzz run btree_fuzz -- -max_total_time=900 -print_final_stats=1
+    
+    - name: Upload crash artifacts
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-crashes-extended
+        path: fuzz/artifacts/
+        if-no-files-found: ignore
+    
+    - name: Upload corpus
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-corpus-extended
+        path: fuzz/corpus/
+
+  fuzz-all-targets:
+    name: All Fuzz Targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    strategy:
+      matrix:
+        target:
+          - sql_parser_fuzz
+          - storage_fuzz
+          - mvcc_fuzz
+          - transaction_fuzz
+          - btree_fuzz
+          - record_fuzz
+          - tokenizer_fuzz
+          - expression_fuzz
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@nightly
+    
+    - name: Install cargo-fuzz
+      run: cargo install cargo-fuzz
+    
+    - name: Cache fuzz corpus
+      uses: actions/cache@v3
+      with:
+        path: |
+          fuzz/corpus/${{ matrix.target }}
+        key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+        restore-keys: |
+          fuzz-corpus-${{ matrix.target }}-
+    
+    - name: Generate corpus
+      run: |
+        cd fuzz
+        python3 generate_corpus.py
+    
+    - name: Build
+      run: |
+        cd fuzz
+        cargo build --release --bin ${{ matrix.target }}
+    
+    - name: Fuzz ${{ matrix.target }}
+      run: |
+        cd fuzz
+        cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -print_final_stats=1
+    
+    - name: Upload crash artifacts
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-crashes-${{ matrix.target }}
+        path: fuzz/artifacts/${{ matrix.target }}/
+        if-no-files-found: ignore
+
+  corpus-stats:
+    name: Corpus Statistics
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Generate corpus
+      run: |
+        cd fuzz
+        python3 generate_corpus.py
+    
+    - name: Count corpus files
+      run: |
+        echo "## Fuzz Corpus Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Target | Files |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        
+        total=0
+        for dir in fuzz/corpus/*/; do
+          if [ -d "$dir" ]; then
+            name=$(basename "$dir")
+            count=$(ls "$dir" | wc -l)
+            echo "| $name | $count |" >> $GITHUB_STEP_SUMMARY
+            total=$((total + count))
+          fi
+        done
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Total: $total corpus files**" >> $GITHUB_STEP_SUMMARY
+        
+        if [ $total -ge 1000 ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Target of 1000+ test cases achieved!" >> $GITHUB_STEP_SUMMARY
+        fi

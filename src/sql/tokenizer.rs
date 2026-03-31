@@ -26,12 +26,13 @@ impl<'a> Tokenizer<'a> {
             ')' => { self.advance(); Token::RParen }
             '[' => { self.advance(); Token::LBracket }
             ']' => { self.advance(); Token::RBracket }
-            '?' => { self.advance(); Token::QuestionMark }  // 占位符
+            '?' => { self.advance(); Token::QuestionMark }
             '*' => { self.advance(); Token::Star }
             '+' => { self.advance(); Token::Plus }
             '-' => { self.advance(); Token::Minus }
             '/' => { self.advance(); Token::Slash }
             '=' => { self.advance(); Token::Equal }
+            '.' => { self.advance(); Token::Dot }
             '<' => self.match_less(),
             '>' => self.match_greater(),
             '!' => self.match_bang(),
@@ -134,6 +135,7 @@ impl<'a> Tokenizer<'a> {
             "DROP" => Token::Drop,
             "TABLE" => Token::Table,
             "INDEX" => Token::Index,
+            "TRIGGER" => Token::Trigger,
             "FROM" => Token::From,
             "WHERE" => Token::Where,
             "SET" => Token::Set,
@@ -156,6 +158,7 @@ impl<'a> Tokenizer<'a> {
             "TEXT" => Token::Text,
             "BLOB" => Token::Blob,
             "VECTOR" => Token::Vector,
+            "JSON" => Token::Json,
             "LIMIT" => Token::Limit,
             "OFFSET" => Token::Offset,
             "ORDER" => Token::Order,
@@ -200,6 +203,55 @@ impl<'a> Tokenizer<'a> {
             // CTE keywords
             "WITH" => Token::With,
             "RECURSIVE" => Token::Recursive,
+            // Trigger keywords
+            "BEFORE" => Token::Before,
+            "AFTER" => Token::After,
+            "INSTEAD" => Token::Instead,
+            "OF" => Token::Of,
+            "FOR" => Token::For,
+            "EACH" => Token::Each,
+            "ROW" => Token::Row,
+            "WHEN" => Token::When,
+            "THEN" => Token::Then,
+            "END" => Token::End,
+            "NEW" => Token::New,
+            "OLD" => Token::Old,
+            // Window function keywords
+            "OVER" => Token::Over,
+            "PARTITION" => Token::Partition,
+            "RANGE" => Token::Range,
+            "ROWS" => Token::Rows,
+            "BETWEEN" => Token::Between,
+            "UNBOUNDED" => Token::Unbounded,
+            "PRECEDING" => Token::Preceding,
+            "FOLLOWING" => Token::Following,
+            "CURRENT" => Token::Current,
+            "ROW_NUMBER" => Token::RowNumber,
+            "RANK" => Token::Rank,
+            "DENSE_RANK" => Token::DenseRank,
+            "LEAD" => Token::Lead,
+            "LAG" => Token::Lag,
+            "FIRST_VALUE" => Token::FirstValue,
+            "LAST_VALUE" => Token::LastValue,
+            "NTH_VALUE" => Token::NthValue,
+            // Virtual table keywords
+            "VIRTUAL" => Token::Virtual,
+            "FTS5" => Token::Fts5,
+            "RTREE" => Token::Rtree,
+            // JSON keywords
+            "JSON" => Token::Json,
+            "JSON_ARRAY" => Token::JsonArray,
+            "JSON_OBJECT" => Token::JsonObject,
+            "JSON_EXTRACT" => Token::JsonExtract,
+            "JSON_TYPE" => Token::JsonType,
+            // Match operator
+            "MATCH" => Token::Match,
+            // Check option
+            "CHECK" => Token::Check,
+            "OPTION" => Token::Option,
+            // Generated columns
+            "GENERATED" => Token::Generated,
+            "ALWAYS" => Token::Always,
             _ => Token::Identifier(text.to_string()),
         }
     }
@@ -253,5 +305,40 @@ mod tests {
     fn test_number() {
         let mut tokenizer = Tokenizer::new("42");
         assert!(matches!(tokenizer.next_token(), Token::NumberLiteral(42)));
+    }
+
+    #[test]
+    fn test_trigger_keywords() {
+        let mut tokenizer = Tokenizer::new("CREATE TRIGGER BEFORE INSERT");
+        assert!(matches!(tokenizer.next_token(), Token::Create));
+        assert!(matches!(tokenizer.next_token(), Token::Trigger));
+        assert!(matches!(tokenizer.next_token(), Token::Before));
+    }
+
+    #[test]
+    fn test_window_function_keywords() {
+        let mut tokenizer = Tokenizer::new("ROW_NUMBER() OVER (PARTITION BY)");
+        assert!(matches!(tokenizer.next_token(), Token::RowNumber));
+        assert!(matches!(tokenizer.next_token(), Token::LParen));
+        assert!(matches!(tokenizer.next_token(), Token::RParen));
+        assert!(matches!(tokenizer.next_token(), Token::Over));
+    }
+
+    #[test]
+    fn test_virtual_table_keywords() {
+        let mut tokenizer = Tokenizer::new("CREATE VIRTUAL TABLE USING FTS5");
+        assert!(matches!(tokenizer.next_token(), Token::Create));
+        assert!(matches!(tokenizer.next_token(), Token::Virtual));
+        assert!(matches!(tokenizer.next_token(), Token::Table));
+        assert!(matches!(tokenizer.next_token(), Token::Using));
+        assert!(matches!(tokenizer.next_token(), Token::Fts5));
+    }
+
+    #[test]
+    fn test_json_keywords() {
+        let mut tokenizer = Tokenizer::new("JSON_EXTRACT(data, '$.name')");
+        assert!(matches!(tokenizer.next_token(), Token::JsonExtract));
+        assert!(matches!(tokenizer.next_token(), Token::LParen));
+        assert!(matches!(tokenizer.next_token(), Token::Identifier(s) if s == "data"));
     }
 }

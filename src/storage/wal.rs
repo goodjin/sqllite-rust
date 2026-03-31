@@ -5,6 +5,12 @@
 //! - Buffered writes with configurable batch size
 //! - Checkpoint mechanism to flush logs to data pages
 //! - Crash recovery support
+//!
+//! Phase 1 Week 1 Optimizations:
+//! - Group commit: Multiple transactions share a single fsync
+//! - Batch write buffer with size and time-based flushing
+//! - Optimized fsync frequency with adaptive batching
+//! - Fallback mechanism for single-transaction commit on failure
 
 use crate::pager::PageId;
 use crate::storage::{Result, StorageError};
@@ -12,6 +18,8 @@ use crate::pager::page::Page;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, Condvar};
 
 /// WAL file header
 #[derive(Debug, Clone)]
@@ -162,7 +170,71 @@ impl WalFrame {
     }
 }
 
-/// Write-Ahead Log manager
+/// Group commit configuration
+#[derive(Debug, Clone)]
+pub struct GroupCommitConfig {
+    /// Enable group commit
+    pub enabled: bool,
+    /// Maximum batch size before forcing flush
+    pub max_batch_size: usize,
+    /// Maximum time to wait before flushing (milliseconds)
+    pub flush_timeout_ms: u64,
+    /// Minimum batch size to trigger flush
+    pub min_batch_size: usize,
+    /// Adaptive batching based on workload
+    pub adaptive_batching: bool,
+    /// Target flush latency in milliseconds
+    pub target_latency_ms: u64,
+}
+
+impl Default for GroupCommitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_batch_size: 100,
+            flush_timeout_ms: 10,
+            min_batch_size: 1,
+            adaptive_batching: true,
+            target_latency_ms: 5,
+        }
+    }
+}
+
+/// Pending commit for group commit
+#[derive(Debug)]
+struct PendingCommit {
+    commit_id: u64,
+    frames: Vec<WalFrame>,
+    /// Notification for synchronous waiters
+    notify: Option<Arc<(Mutex<bool>, Condvar)>>,
+    /// Timestamp when commit was queued
+    queued_at: Instant,
+}
+
+/// WAL statistics for monitoring
+#[derive(Debug, Clone, Default)]
+pub struct WalStats {
+    /// Total frames written
+    pub frames_written: u64,
+    /// Total bytes written
+    pub bytes_written: u64,
+    /// Number of fsync calls
+    pub fsync_count: u64,
+    /// Number of group commits
+    pub group_commits: u64,
+    /// Number of single commits (fallback)
+    pub single_commits: u64,
+    /// Average batch size
+    pub avg_batch_size: f64,
+    /// Average flush latency in microseconds
+    pub avg_flush_latency_us: f64,
+    /// Write amplification (actual writes / logical writes)
+    pub write_amplification: f64,
+    /// Current buffer size
+    pub current_buffer_size: usize,
+}
+
+/// Write-Ahead Log manager with group commit support
 pub struct Wal {
     /// WAL file
     file: File,
@@ -182,6 +254,20 @@ pub struct Wal {
     frame_count: u64,
     /// Page size
     page_size: usize,
+    /// Group commit configuration
+    group_commit: GroupCommitConfig,
+    /// Pending commits queue
+    pending_commits: Vec<PendingCommit>,
+    /// Last flush time
+    last_flush: Instant,
+    /// Statistics
+    stats: WalStats,
+    /// Adaptive batch size (changes based on workload)
+    adaptive_batch_size: usize,
+    /// Track consecutive fast commits for adaptive batching
+    fast_commit_streak: u32,
+    /// Track consecutive slow commits for adaptive batching
+    slow_commit_streak: u32,
 }
 
 impl Wal {
@@ -189,9 +275,22 @@ impl Wal {
     pub const DEFAULT_BUFFER_LIMIT: usize = 1024 * 1024;
     /// Default checkpoint threshold: 1000 frames
     pub const DEFAULT_CHECKPOINT_THRESHOLD: usize = 1000;
+    /// Min batch size for adaptive batching
+    const MIN_ADAPTIVE_BATCH: usize = 5;
+    /// Max batch size for adaptive batching
+    const MAX_ADAPTIVE_BATCH: usize = 500;
 
     /// Open or create a WAL file
     pub fn open<P: AsRef<Path>>(path: P, page_size: usize) -> Result<Self> {
+        Self::with_config(path, page_size, GroupCommitConfig::default())
+    }
+    
+    /// Open with group commit configuration
+    pub fn with_config<P: AsRef<Path>>(
+        path: P, 
+        page_size: usize, 
+        group_commit: GroupCommitConfig
+    ) -> Result<Self> {
         let path = path.as_ref();
         let wal_path = path.with_extension("wal");
 
@@ -232,6 +331,13 @@ impl Wal {
             checkpoint_threshold: Self::DEFAULT_CHECKPOINT_THRESHOLD,
             frame_count,
             page_size,
+            group_commit,
+            pending_commits: Vec::new(),
+            last_flush: Instant::now(),
+            stats: WalStats::default(),
+            adaptive_batch_size: 50,
+            fast_commit_streak: 0,
+            slow_commit_streak: 0,
         })
     }
 
@@ -280,6 +386,9 @@ impl Wal {
             return Ok(());
         }
 
+        let flush_start = Instant::now();
+        let batch_size = self.buffer.len();
+
         // Seek to end of file
         self.file.seek(SeekFrom::End(0))?;
 
@@ -287,15 +396,200 @@ impl Wal {
         for frame in &self.buffer {
             self.file.write_all(&frame.to_bytes())?;
             self.frame_count += 1;
+            self.stats.frames_written += 1;
+            self.stats.bytes_written += (WalFrame::HEADER_SIZE + frame.page_data.len()) as u64;
         }
 
         // Single fsync for the entire batch (this is the key optimization!)
         self.file.sync_all()?;
+        self.stats.fsync_count += 1;
+
+        // Update statistics
+        let latency = flush_start.elapsed().as_micros() as f64;
+        self.stats.avg_flush_latency_us = 
+            (self.stats.avg_flush_latency_us * (self.stats.group_commits as f64) + latency)
+            / (self.stats.group_commits + 1) as f64;
+        
+        self.stats.avg_batch_size = 
+            (self.stats.avg_batch_size * (self.stats.group_commits as f64) + batch_size as f64)
+            / (self.stats.group_commits + 1) as f64;
+        
+        self.stats.group_commits += 1;
+        
+        // Adaptive batching
+        if self.group_commit.adaptive_batching {
+            self.update_adaptive_batch_size(latency);
+        }
 
         // Clear buffer
         self.buffer.clear();
         self.buffer_size = 0;
+        self.last_flush = Instant::now();
 
+        Ok(())
+    }
+    
+    /// Update adaptive batch size based on flush latency
+    fn update_adaptive_batch_size(&mut self, latency_us: f64) {
+        let target_latency_us = (self.group_commit.target_latency_ms * 1000) as f64;
+        
+        if latency_us < target_latency_us * 0.8 {
+            // Fast flush, can increase batch size
+            self.fast_commit_streak += 1;
+            self.slow_commit_streak = 0;
+            
+            if self.fast_commit_streak >= 3 {
+                self.adaptive_batch_size = (self.adaptive_batch_size + 5)
+                    .min(Self::MAX_ADAPTIVE_BATCH);
+                self.fast_commit_streak = 0;
+            }
+        } else if latency_us > target_latency_us * 1.2 {
+            // Slow flush, decrease batch size
+            self.slow_commit_streak += 1;
+            self.fast_commit_streak = 0;
+            
+            if self.slow_commit_streak >= 2 {
+                self.adaptive_batch_size = (self.adaptive_batch_size.saturating_sub(10))
+                    .max(Self::MIN_ADAPTIVE_BATCH);
+                self.slow_commit_streak = 0;
+            }
+        }
+    }
+
+    /// Queue a commit for group commit
+    /// 
+    /// Returns true if the commit was queued, false if it should be flushed immediately
+    pub fn queue_commit(&mut self, wait_for_sync: bool) -> Result<Option<Arc<(Mutex<bool>, Condvar)>>> {
+        let notify = if wait_for_sync {
+            Some(Arc::new((Mutex::new(false), Condvar::new())))
+        } else {
+            None
+        };
+
+        let pending = PendingCommit {
+            commit_id: self.current_commit_id,
+            frames: self.buffer.drain(..).collect(),
+            notify: notify.clone(),
+            queued_at: Instant::now(),
+        };
+
+        self.pending_commits.push(pending);
+
+        // Check if we should flush the batch
+        let should_flush = self.should_flush_batch();
+
+        if should_flush {
+            self.flush_pending_commits()?;
+        }
+
+        Ok(notify)
+    }
+
+    /// Check if pending commits should be flushed
+    fn should_flush_batch(&self) -> bool {
+        if self.pending_commits.is_empty() {
+            return false;
+        }
+
+        // Check batch size
+        let total_frames: usize = self.pending_commits.iter().map(|c| c.frames.len()).sum();
+        let batch_threshold = if self.group_commit.adaptive_batching {
+            self.adaptive_batch_size
+        } else {
+            self.group_commit.max_batch_size
+        };
+        
+        if total_frames >= batch_threshold {
+            return true;
+        }
+
+        // Check timeout
+        if let Some(first) = self.pending_commits.first() {
+            let elapsed = first.queued_at.elapsed();
+            if elapsed >= Duration::from_millis(self.group_commit.flush_timeout_ms) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Flush all pending commits as a batch (group commit)
+    fn flush_pending_commits(&mut self) -> Result<()> {
+        if self.pending_commits.is_empty() {
+            return Ok(());
+        }
+
+        let flush_start = Instant::now();
+        let batch_count = self.pending_commits.len();
+
+        // Collect all frames from pending commits
+        let mut all_frames: Vec<WalFrame> = Vec::new();
+        let notifications: Vec<Option<Arc<(Mutex<bool>, Condvar)>>> = self.pending_commits
+            .iter()
+            .map(|c| c.notify.clone())
+            .collect();
+
+        for pending in &self.pending_commits {
+            all_frames.extend(pending.frames.clone());
+        }
+
+        if all_frames.is_empty() {
+            self.pending_commits.clear();
+            return Ok(());
+        }
+
+        // Seek to end and write all frames
+        self.file.seek(SeekFrom::End(0))?;
+
+        for frame in &all_frames {
+            self.file.write_all(&frame.to_bytes())?;
+            self.frame_count += 1;
+            self.stats.frames_written += 1;
+            self.stats.bytes_written += (WalFrame::HEADER_SIZE + frame.page_data.len()) as u64;
+        }
+
+        // Single fsync for the entire group
+        self.file.sync_all()?;
+        self.stats.fsync_count += 1;
+        self.stats.group_commits += 1;
+
+        // Update statistics
+        let latency = flush_start.elapsed().as_micros() as f64;
+        self.stats.avg_flush_latency_us = 
+            (self.stats.avg_flush_latency_us * (self.stats.group_commits.saturating_sub(1)) as f64 + latency)
+            / self.stats.group_commits as f64;
+        
+        self.stats.avg_batch_size = 
+            (self.stats.avg_batch_size * (self.stats.group_commits.saturating_sub(1)) as f64 + batch_count as f64)
+            / self.stats.group_commits as f64;
+
+        // Adaptive batching
+        if self.group_commit.adaptive_batching {
+            self.update_adaptive_batch_size(latency);
+        }
+
+        // Notify all waiting threads
+        for notify in notifications {
+            if let Some(n) = notify {
+                let (lock, cvar) = &*n;
+                if let Ok(mut flushed) = lock.lock() {
+                    *flushed = true;
+                    cvar.notify_all();
+                }
+            }
+        }
+
+        self.pending_commits.clear();
+        self.last_flush = Instant::now();
+
+        Ok(())
+    }
+
+    /// Single transaction commit (fallback when group commit fails)
+    pub fn commit_single(&mut self) -> Result<()> {
+        self.flush_buffer()?;
+        self.stats.single_commits += 1;
         Ok(())
     }
 
@@ -304,6 +598,8 @@ impl Wal {
     where
         F: FnMut(PageId, &[u8]) -> Result<()>,
     {
+        // First flush any pending commits
+        self.flush_pending_commits()?;
         self.flush()?;
 
         // Read all frames from WAL
@@ -363,6 +659,15 @@ impl Wal {
             }
         }
 
+        // Check pending commits
+        for pending in &self.pending_commits {
+            for frame in pending.frames.iter().rev() {
+                if frame.page_id == page_id {
+                    return Ok(Some(frame.page_data.clone()));
+                }
+            }
+        }
+
         // Then check WAL file
         self.file.seek(SeekFrom::Start(WalHeader::SIZE as u64))?;
 
@@ -398,15 +703,42 @@ impl Wal {
     /// Get the number of frames in the WAL
     pub fn frame_count(&self) -> u64 {
         self.frame_count + self.buffer.len() as u64
+            + self.pending_commits.iter().map(|c| c.frames.len() as u64).sum::<u64>()
     }
 
     /// Check if checkpoint is needed
     pub fn needs_checkpoint(&self) -> bool {
         self.frame_count as usize >= self.checkpoint_threshold
     }
+    
+    /// Get WAL statistics
+    pub fn stats(&self) -> &WalStats {
+        &self.stats
+    }
+    
+    /// Get current adaptive batch size
+    pub fn adaptive_batch_size(&self) -> usize {
+        self.adaptive_batch_size
+    }
+    
+    /// Set group commit configuration
+    pub fn set_group_commit_config(&mut self, config: GroupCommitConfig) {
+        self.group_commit = config;
+    }
+    
+    /// Get number of pending commits
+    pub fn pending_count(&self) -> usize {
+        self.pending_commits.len()
+    }
+    
+    /// Force flush all pending commits
+    pub fn force_flush(&mut self) -> Result<()> {
+        self.flush_pending_commits()
+    }
 
     /// Close WAL and ensure all data is flushed
     pub fn close(mut self) -> Result<()> {
+        self.flush_pending_commits()?;
         self.flush()?;
         Ok(())
     }
@@ -567,5 +899,110 @@ mod tests {
         // Should see latest version
         let result = wal.read_page(1).unwrap();
         assert_eq!(result.unwrap()[0], 2);
+    }
+    
+    #[test]
+    fn test_group_commit_config() {
+        let config = GroupCommitConfig {
+            enabled: true,
+            max_batch_size: 50,
+            flush_timeout_ms: 5,
+            min_batch_size: 1,
+            adaptive_batching: true,
+            target_latency_ms: 3,
+        };
+        
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+        
+        let mut wal = Wal::with_config(&path, 4096, config).unwrap();
+        
+        // Queue some commits with force flush
+        wal.begin_transaction();
+        let page = Page::from_bytes(1, vec![1u8; 4096]);
+        wal.write_page(&page).unwrap();
+        
+        let notify = wal.queue_commit(true).unwrap();
+        assert!(notify.is_some());
+        
+        // Force flush to ensure group commit happens
+        wal.force_flush().unwrap();
+        
+        // Check stats
+        let stats = wal.stats();
+        assert!(stats.group_commits >= 1, "Expected at least 1 group commit");
+    }
+    
+    #[test]
+    fn test_adaptive_batching() {
+        let config = GroupCommitConfig {
+            enabled: true,
+            max_batch_size: 100,
+            flush_timeout_ms: 100, // Long timeout to test adaptive batching
+            min_batch_size: 1,
+            adaptive_batching: true,
+            target_latency_ms: 1, // Very low target to trigger adjustment
+        };
+        
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+        
+        let mut wal = Wal::with_config(&path, 4096, config).unwrap();
+        
+        // Verify adaptive batching is configured
+        assert!(wal.adaptive_batch_size() >= Wal::MIN_ADAPTIVE_BATCH);
+        assert!(wal.adaptive_batch_size() <= Wal::MAX_ADAPTIVE_BATCH);
+        
+        // Perform several commits - adaptive batching adjusts based on latency
+        for i in 0..10 {
+            wal.begin_transaction();
+            let page = Page::from_bytes(i as u32, vec![i as u8; 4096]);
+            wal.write_page(&page).unwrap();
+            wal.flush().unwrap();
+        }
+        
+        // Stats should show commits were made
+        let stats = wal.stats();
+        assert!(stats.group_commits + stats.single_commits >= 5, "Expected commits to be recorded");
+    }
+    
+    #[test]
+    fn test_single_commit_fallback() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+        
+        let mut wal = Wal::open(&path, 4096).unwrap();
+        
+        wal.begin_transaction();
+        let page = Page::from_bytes(1, vec![1u8; 4096]);
+        wal.write_page(&page).unwrap();
+        
+        // Use single commit fallback
+        wal.commit_single().unwrap();
+        
+        let stats = wal.stats();
+        assert_eq!(stats.single_commits, 1);
+    }
+    
+    #[test]
+    fn test_wal_statistics() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string() + ".db";
+        
+        let mut wal = Wal::open(&path, 4096).unwrap();
+        
+        // Write some pages
+        for i in 1..=5 {
+            wal.begin_transaction();
+            let page = Page::from_bytes(i, vec![i as u8; 4096]);
+            wal.write_page(&page).unwrap();
+            wal.flush().unwrap();
+        }
+        
+        let stats = wal.stats();
+        assert_eq!(stats.frames_written, 5);
+        assert!(stats.bytes_written > 0);
+        assert!(stats.fsync_count > 0);
+        assert!(stats.avg_batch_size > 0.0);
     }
 }

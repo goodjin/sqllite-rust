@@ -348,6 +348,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "age".to_string(),
@@ -355,6 +358,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ]
     }

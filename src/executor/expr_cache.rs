@@ -332,6 +332,15 @@ pub fn is_cacheable(expr: &Expression) -> bool {
 
         // Subqueries have their own caching, don't cache here
         Expression::Subquery(_) => false,
+        
+        // JSON functions are generally deterministic
+        Expression::JsonFunction { .. } => true,
+        
+        // JSON extract is cacheable
+        Expression::JsonExtract { expr, .. } => is_cacheable(expr),
+        
+        // Trigger references are not cacheable (depend on trigger context)
+        Expression::TriggerReference { .. } => false,
     }
 }
 

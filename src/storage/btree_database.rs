@@ -144,6 +144,7 @@ impl BtreeTable {
                 DataType::Integer => data.push(1),
                 DataType::Text => data.push(2),
                 DataType::Blob => data.push(4),
+                DataType::Json => data.push(6),
                 DataType::Vector(dim) => {
                     data.push(5);
                     data.extend_from_slice(&dim.to_be_bytes());
@@ -221,6 +222,10 @@ impl BtreeTable {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
+
             });
         }
 
@@ -1252,6 +1257,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -1259,6 +1267,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
 
@@ -1283,6 +1294,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -1290,6 +1304,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1329,6 +1346,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -1336,6 +1356,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1367,6 +1390,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -1374,6 +1400,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1406,6 +1435,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -1413,6 +1445,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1457,6 +1492,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), parent_columns).unwrap();
@@ -1469,6 +1507,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "user_id".to_string(),
@@ -1481,6 +1522,9 @@ mod tests {
                     on_delete: ForeignKeyAction::Restrict,
                     on_update: ForeignKeyAction::NoAction,
                 }),
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("orders".to_string(), child_columns).unwrap();
@@ -1520,6 +1564,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), parent_columns).unwrap();
@@ -1532,6 +1579,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "user_id".to_string(),
@@ -1544,6 +1594,9 @@ mod tests {
                     on_delete: ForeignKeyAction::Cascade,
                     on_update: ForeignKeyAction::NoAction,
                 }),
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("orders".to_string(), child_columns).unwrap();
@@ -1584,6 +1637,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), parent_columns).unwrap();
@@ -1596,6 +1652,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "user_id".to_string(),
@@ -1608,6 +1667,9 @@ mod tests {
                     on_delete: ForeignKeyAction::SetNull,
                     on_update: ForeignKeyAction::NoAction,
                 }),
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("orders".to_string(), child_columns).unwrap();
@@ -1642,6 +1704,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1653,6 +1718,9 @@ mod tests {
             nullable: true,
             primary_key: false,
             foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
         };
         db.alter_table_add_column("users", new_column).unwrap();
 
@@ -1677,6 +1745,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "email".to_string(),
@@ -1684,6 +1755,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1712,6 +1786,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
@@ -1740,6 +1817,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "email".to_string(),
@@ -1747,6 +1827,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();

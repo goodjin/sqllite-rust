@@ -23,7 +23,12 @@ fn benchmark_wal_batch_commit(c: &mut Criterion) {
                     
                     let config = TransactionConfig {
                         group_commit: false,
-                        ..Default::default()
+                        group_commit_timeout_ms: 0,
+                        max_pending_transactions: 1,
+                        async_commit: false,
+                        use_async_wal: false,
+                        wal_batch_size: 1,
+                        wal_flush_timeout_ms: 0,
                     };
                     let tm = TransactionManager::with_config(&path, 4096, config).unwrap();
                     (tm, path)
@@ -54,6 +59,9 @@ fn benchmark_wal_batch_commit(c: &mut Criterion) {
                         group_commit_timeout_ms: 10000, // Long timeout, manual flush
                         max_pending_transactions: size,
                         async_commit: false,
+                        use_async_wal: true,
+                        wal_batch_size: size,
+                        wal_flush_timeout_ms: 100,
                     };
                     let tm = TransactionManager::with_config(&path, 4096, config).unwrap();
                     (tm, path)
@@ -90,6 +98,9 @@ fn benchmark_wal_throughput(c: &mut Criterion) {
                 group_commit_timeout_ms: 100, // 100ms window
                 max_pending_transactions: 1000,
                 async_commit: false,
+                use_async_wal: true,
+                wal_batch_size: 100,
+                wal_flush_timeout_ms: 100,
             };
             TransactionManager::with_config(&path, 4096, config).unwrap()
         }, |mut tm| {
@@ -114,7 +125,12 @@ fn benchmark_wal_throughput(c: &mut Criterion) {
             
             let config = TransactionConfig {
                 group_commit: false,
-                ..Default::default()
+                group_commit_timeout_ms: 0,
+                max_pending_transactions: 1,
+                async_commit: false,
+                use_async_wal: false,
+                wal_batch_size: 1,
+                wal_flush_timeout_ms: 0,
             };
             TransactionManager::with_config(&path, 4096, config).unwrap()
         }, |mut tm| {
@@ -146,6 +162,9 @@ fn benchmark_wal_latency(c: &mut Criterion) {
                 group_commit_timeout_ms: 1, // 1ms
                 max_pending_transactions: 10,
                 async_commit: false,
+                use_async_wal: true,
+                wal_batch_size: 10,
+                wal_flush_timeout_ms: 10,
             };
             TransactionManager::with_config(&path, 4096, config).unwrap()
         }, |mut tm| {
@@ -168,6 +187,9 @@ fn benchmark_wal_latency(c: &mut Criterion) {
                 group_commit_timeout_ms: 100, // 100ms
                 max_pending_transactions: 1000,
                 async_commit: false,
+                use_async_wal: true,
+                wal_batch_size: 100,
+                wal_flush_timeout_ms: 100,
             };
             TransactionManager::with_config(&path, 4096, config).unwrap()
         }, |mut tm| {

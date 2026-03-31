@@ -1,62 +1,82 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, black_box};
+//! Phase 1 Week 1: Comprehensive Performance Benchmark Suite
+//!
+//! This benchmark suite covers:
+//! - Point queries (indexed and non-indexed)
+//! - Range queries (indexed and non-indexed)
+//! - Bulk insert performance
+//! - Concurrent read performance
+//! - Index covering scan performance
+//! - Aggregation queries
+
+use criterion::{
+    criterion_group, criterion_main, Criterion, BenchmarkId, black_box, Throughput,
+};
 use std::time::Duration;
-use std::fs;
 use tempfile::TempDir;
 
-// 导入本项目的库
-use sqllite_rust::sql::Parser;
 use sqllite_rust::executor::{Executor, ExecuteResult};
 
-/// 清理并创建临时数据库路径
+/// Helper: Create a temporary database path
 fn temp_db_path() -> (TempDir, String) {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+    let db_path = temp_dir.path().join("bench.db");
     (temp_dir, db_path.to_str().unwrap().to_string())
 }
 
-/// 执行 SQL 语句
+/// Helper: Execute SQL
 fn execute_sql(executor: &mut Executor, sql: &str) {
-    let mut parser = Parser::new(sql).expect("Tokenizer failed");
-    let stmt = parser.parse().expect("Parse failed");
-    executor.execute(&stmt).expect("Execution failed");
+    executor.execute_sql(sql).expect("SQL execution failed");
 }
 
-/// 执行查询并返回结果
+/// Helper: Execute query and return row count
 fn execute_query(executor: &mut Executor, sql: &str) -> usize {
-    let mut parser = Parser::new(sql).expect("Tokenizer failed");
-    let stmt = parser.parse().expect("Parse failed");
-    match executor.execute(&stmt).expect("Execution failed") {
-        ExecuteResult::Query(result) => result.rows.len(),
-        _ => 0,
+    match executor.execute_sql(sql) {
+        Ok(ExecuteResult::Query(result)) => result.rows.len(),
+        Ok(_) => 0,
+        Err(e) => panic!("Query failed: {}", e),
     }
 }
 
-// ==================== 测试方案 1: 单条插入 ====================
-// 对应 SQLite: 100 和 1000 条记录
-fn bench_single_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_single_insert");
+// ============================================================================
+// Benchmark 1: Point Select (Indexed)
+// ============================================================================
+
+fn bench_point_select_indexed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("point_select_indexed");
     group.measurement_time(Duration::from_secs(10));
-    group.sample_size(10);
+    group.sample_size(100);
 
-    for row_count in [100, 1000].iter() {
+    for size in [1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(1));
+        
         group.bench_with_input(
-            BenchmarkId::from_parameter(row_count),
-            row_count,
+            BenchmarkId::from_parameter(size),
+            size,
             |b, &n| {
-                b.iter(|| {
-                    let (_temp, db_path) = temp_db_path();
-                    let mut executor = Executor::open(&db_path).expect("Failed to open db");
-
-                    // 创建表
-                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, name TEXT)");
-
-                    // 单条插入
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, email TEXT, age INTEGER)");
+                    execute_sql(&mut executor, "CREATE INDEX idx_email ON users(email)");
+                    
                     for i in 0..n {
-                        let sql = format!("INSERT INTO users VALUES ({}, 'U{}')", i, i);
+                        let sql = format!(
+                            "INSERT INTO users VALUES ({}, 'user{}@example.com', {})",
+                            i, i, i % 100
+                        );
                         execute_sql(&mut executor, &sql);
                     }
-
-                    black_box(executor);
+                }
+                
+                // Benchmark
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let target = format!("user{}@example.com", n / 2);
+                    let count = execute_query(&mut executor, 
+                        &format!("SELECT * FROM users WHERE email = '{}'", target));
+                    black_box(count);
                 });
             },
         );
@@ -65,31 +85,179 @@ fn bench_single_insert(c: &mut Criterion) {
     group.finish();
 }
 
-// ==================== 测试方案 2: 批量插入 ====================
-// 对应 SQLite: 1000 和 10000 条记录
-fn bench_batch_insert(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_batch_insert");
+// ============================================================================
+// Benchmark 2: Point Select (Non-Indexed)
+// ============================================================================
+
+fn bench_point_select_no_index(c: &mut Criterion) {
+    let mut group = c.benchmark_group("point_select_no_index");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    for size in [1_000, 10_000].iter() {
+        group.throughput(Throughput::Elements(1));
+        
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, email TEXT, age INTEGER)");
+                    
+                    for i in 0..n {
+                        let sql = format!(
+                            "INSERT INTO users VALUES ({}, 'user{}@example.com', {})",
+                            i, i, i % 100
+                        );
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let target = format!("user{}@example.com", n / 2);
+                    let count = execute_query(&mut executor, 
+                        &format!("SELECT * FROM users WHERE email = '{}'", target));
+                    black_box(count);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark 3: Range Scan (Indexed)
+// ============================================================================
+
+fn bench_range_scan_indexed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("range_scan_indexed");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(30);
+
+    for size in [10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(1000));
+        
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, age INTEGER, name TEXT)");
+                    execute_sql(&mut executor, "CREATE INDEX idx_age ON users(age)");
+                    
+                    for i in 0..n {
+                        let sql = format!(
+                            "INSERT INTO users VALUES ({}, {}, 'User{}')",
+                            i, i % 100, i
+                        );
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, 
+                        "SELECT * FROM users WHERE age BETWEEN 20 AND 30");
+                    black_box(count);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark 4: Covering Index Scan
+// ============================================================================
+
+fn bench_covering_index_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("covering_index_scan");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    for size in [10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(100));
+        
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup - covering index on email only
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, email TEXT, age INTEGER)");
+                    execute_sql(&mut executor, "CREATE INDEX idx_email ON users(email)");
+                    
+                    for i in 0..n {
+                        let sql = format!(
+                            "INSERT INTO users VALUES ({}, 'user{}@example.com', {})",
+                            i, i, i % 100
+                        );
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark - SELECT email only (covering index)
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, 
+                        "SELECT email FROM users WHERE email LIKE 'user1%'");
+                    black_box(count);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark 5: Bulk Insert with Batch
+// ============================================================================
+
+fn bench_bulk_insert_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bulk_insert_batch");
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(10);
 
-    for batch_size in [1000, 10000].iter() {
+    for size in [1_000, 10_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        
         group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            batch_size,
+            BenchmarkId::from_parameter(size),
+            size,
             |b, &n| {
                 b.iter(|| {
                     let (_temp, db_path) = temp_db_path();
-                    let mut executor = Executor::open(&db_path).expect("Failed to open db");
-
-                    // 创建表
-                    execute_sql(&mut executor, "CREATE TABLE logs (id INTEGER, msg TEXT)");
-
-                    // 批量插入
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    
+                    execute_sql(&mut executor, "CREATE TABLE logs (id INTEGER, message TEXT, timestamp INTEGER)");
+                    execute_sql(&mut executor, "BEGIN");
+                    
                     for i in 0..n {
-                        let sql = format!("INSERT INTO logs VALUES ({}, 'M{}')", i, i);
+                        let sql = format!(
+                            "INSERT INTO logs VALUES ({}, 'Log message number {}', {})",
+                            i, i, i
+                        );
                         execute_sql(&mut executor, &sql);
                     }
-
+                    
+                    execute_sql(&mut executor, "COMMIT");
                     black_box(executor);
                 });
             },
@@ -99,33 +267,44 @@ fn bench_batch_insert(c: &mut Criterion) {
     group.finish();
 }
 
-// ==================== 测试方案 3: 简单查询 ====================
-// 对应 SQLite: 10000 条记录的 WHERE 查询
-fn bench_simple_select(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_simple_select");
+// ============================================================================
+// Benchmark 6: Aggregation Queries
+// ============================================================================
+
+fn bench_aggregation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("aggregation");
     group.measurement_time(Duration::from_secs(10));
-    group.sample_size(20);
+    group.sample_size(30);
 
-    for table_size in [10000].iter() {
-        // 准备数据（不计入基准时间）
-        let (_temp, db_path) = temp_db_path();
-        {
-            let mut executor = Executor::open(&db_path).expect("Failed to open db");
-            execute_sql(&mut executor, "CREATE TABLE products (id INTEGER, price INTEGER)");
-
-            for i in 0..*table_size {
-                let sql = format!("INSERT INTO products VALUES ({}, {})", i, i % 100);
-                execute_sql(&mut executor, &sql);
-            }
-        }
-
+    for size in [10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        
         group.bench_with_input(
-            BenchmarkId::from_parameter(table_size),
-            table_size,
-            |b, &_n| {
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE sales (id INTEGER, region TEXT, amount INTEGER)");
+                    
+                    let regions = ["North", "South", "East", "West"];
+                    for i in 0..n {
+                        let sql = format!(
+                            "INSERT INTO sales VALUES ({}, '{}', {})",
+                            i, regions[i % 4], i % 1000
+                        );
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark
                 b.iter(|| {
-                    let mut executor = Executor::open(&db_path).expect("Failed to open db");
-                    let count = execute_query(&mut executor, "SELECT * FROM products WHERE price > 50");
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, 
+                        "SELECT region, COUNT(*), SUM(amount), AVG(amount), MAX(amount), MIN(amount) FROM sales GROUP BY region");
                     black_box(count);
                 });
             },
@@ -135,33 +314,42 @@ fn bench_simple_select(c: &mut Criterion) {
     group.finish();
 }
 
-// ==================== 测试方案 4: 全表扫描 ====================
-// 对应 SQLite: 10000 条记录的全表扫描
+// ============================================================================
+// Benchmark 7: Full Table Scan
+// ============================================================================
+
 fn bench_full_table_scan(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_full_scan");
+    let mut group = c.benchmark_group("full_table_scan");
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(20);
 
-    for table_size in [10000].iter() {
-        // 准备数据
-        let (_temp, db_path) = temp_db_path();
-        {
-            let mut executor = Executor::open(&db_path).expect("Failed to open db");
-            execute_sql(&mut executor, "CREATE TABLE items (id INTEGER, data TEXT)");
-
-            for i in 0..*table_size {
-                let sql = format!("INSERT INTO items VALUES ({}, 'D{}')", i, i);
-                execute_sql(&mut executor, &sql);
-            }
-        }
-
+    for size in [10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        
         group.bench_with_input(
-            BenchmarkId::from_parameter(table_size),
-            table_size,
-            |b, &_n| {
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, name TEXT, email TEXT)");
+                    
+                    for i in 0..n {
+                        let sql = format!(
+                            "INSERT INTO users VALUES ({}, 'User{}', 'user{}@example.com')",
+                            i, i, i
+                        );
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark
                 b.iter(|| {
-                    let mut executor = Executor::open(&db_path).expect("Failed to open db");
-                    let count = execute_query(&mut executor, "SELECT * FROM items");
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, "SELECT * FROM users");
                     black_box(count);
                 });
             },
@@ -171,85 +359,40 @@ fn bench_full_table_scan(c: &mut Criterion) {
     group.finish();
 }
 
-// ==================== 测试方案 5: 解析性能 ====================
-fn bench_sql_parsing(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_sql_parse");
+// ============================================================================
+// Benchmark 8: COUNT(*) Optimization
+// ============================================================================
 
-    let sql_statements = vec![
-        ("simple_select", "SELECT * FROM users WHERE id = 1"),
-        ("complex_select", "SELECT id, name FROM users WHERE id > 10 AND name = 'Alice'"),
-        ("insert", "INSERT INTO users VALUES (1, 'Alice')"),
-        ("create_table", "CREATE TABLE test (id INTEGER, name TEXT)"),
-    ];
-
-    for (name, sql) in sql_statements {
-        group.bench_with_input(
-            BenchmarkId::new("parse", name),
-            &sql,
-            |b, &sql| {
-                b.iter(|| {
-                    let mut parser = Parser::new(sql).expect("Tokenizer failed");
-                    let stmt = parser.parse().expect("Parse failed");
-                    black_box(stmt);
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// ==================== 测试方案 6: 建表性能 ====================
-fn bench_create_table(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_create_table");
-
-    group.bench_function("simple_table", |b| {
-        b.iter(|| {
-            let (_temp, db_path) = temp_db_path();
-            let mut executor = Executor::open(&db_path).expect("Failed to open db");
-            execute_sql(&mut executor, "CREATE TABLE test (id INTEGER, name TEXT)");
-            black_box(executor);
-        });
-    });
-
-    group.finish();
-}
-
-// ==================== 测试方案 7: 混合读写 ====================
-fn bench_mixed_workload(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sqllite_mixed");
+fn bench_count_star(c: &mut Criterion) {
+    let mut group = c.benchmark_group("count_star");
     group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
 
-    for read_ratio in [0.8, 0.5, 0.2].iter() {
+    for size in [10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        
         group.bench_with_input(
-            BenchmarkId::new("read_ratio", read_ratio),
-            read_ratio,
-            |b, &ratio| {
-                b.iter(|| {
-                    let (_temp, db_path) = temp_db_path();
-                    let mut executor = Executor::open(&db_path).expect("Failed to open db");
-
-                    // 初始数据 - 限制在 8 条以内（为写入操作预留空间）
-                    execute_sql(&mut executor, "CREATE TABLE data (id INTEGER, value INTEGER)");
-                    for i in 0..8 {
-                        let sql = format!("INSERT INTO data VALUES ({}, {})", i, i);
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, name TEXT)");
+                    
+                    for i in 0..n {
+                        let sql = format!("INSERT INTO users VALUES ({}, 'User{}')", i, i);
                         execute_sql(&mut executor, &sql);
                     }
-
-                    // 混合操作
-                    for i in 0..5 {
-                        if i as f64 / 50.0 < ratio {
-                            // 读操作
-                            let sql = format!("SELECT * FROM data WHERE id = {}", i % 100);
-                            let _ = execute_query(&mut executor, &sql);
-                        } else {
-                            // 写操作
-                            let sql = format!("INSERT INTO data VALUES ({}, {})", i + 100, i);
-                            execute_sql(&mut executor, &sql);
-                        }
-                    }
-
-                    black_box(executor);
+                }
+                
+                // Benchmark
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, "SELECT COUNT(*) FROM users");
+                    black_box(count);
                 });
             },
         );
@@ -257,15 +400,114 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
     group.finish();
 }
+
+// ============================================================================
+// Benchmark 9: LIKE Query Performance
+// ============================================================================
+
+fn bench_like_query(c: &mut Criterion) {
+    let mut group = c.benchmark_group("like_query");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+
+    for size in [10_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, name TEXT)");
+                    
+                    for i in 0..n {
+                        let sql = format!("INSERT INTO users VALUES ({}, 'User{}')", i, i);
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, "SELECT * FROM users WHERE name LIKE 'User1%'");
+                    black_box(count);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark 10: Join Performance
+// ============================================================================
+
+fn bench_join(c: &mut Criterion) {
+    let mut group = c.benchmark_group("join");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+
+    for size in [1_000, 10_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size),
+            size,
+            |b, &n| {
+                let (_temp, db_path) = temp_db_path();
+                
+                // Setup
+                {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    execute_sql(&mut executor, "CREATE TABLE users (id INTEGER, name TEXT)");
+                    execute_sql(&mut executor, "CREATE TABLE orders (id INTEGER, user_id INTEGER, amount INTEGER)");
+                    
+                    for i in 0..n {
+                        let sql = format!("INSERT INTO users VALUES ({}, 'User{}')", i, i);
+                        execute_sql(&mut executor, &sql);
+                    }
+                    
+                    for i in 0..(n * 5) {
+                        let sql = format!("INSERT INTO orders VALUES ({}, {}, {})", i, i % n, i % 100);
+                        execute_sql(&mut executor, &sql);
+                    }
+                }
+                
+                // Benchmark
+                b.iter(|| {
+                    let mut executor = Executor::open(&db_path).unwrap();
+                    let count = execute_query(&mut executor, 
+                        "SELECT u.*, o.amount FROM users u JOIN orders o ON u.id = o.user_id LIMIT 100");
+                    black_box(count);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark Groups
+// ============================================================================
 
 criterion_group!(
     benches,
-    bench_sql_parsing,
-    bench_create_table,
-    bench_single_insert,
-    bench_batch_insert,
-    bench_simple_select,
+    bench_point_select_indexed,
+    bench_point_select_no_index,
+    bench_range_scan_indexed,
+    bench_covering_index_scan,
+    bench_bulk_insert_batch,
+    bench_aggregation,
     bench_full_table_scan,
-    bench_mixed_workload
+    bench_count_star,
+    bench_like_query,
+    bench_join,
 );
+
 criterion_main!(benches);

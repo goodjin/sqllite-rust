@@ -1,0 +1,80 @@
+[package]
+name = "sqllite-rust-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1.3"
+
+[dependencies.sqllite-rust]
+path = ".."
+
+# SQL Parser Fuzz Target
+[[bin]]
+name = "sql_parser_fuzz"
+path = "fuzz_targets/sql_parser_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Storage Engine Fuzz Target
+[[bin]]
+name = "storage_fuzz"
+path = "fuzz_targets/storage_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# MVCC Concurrency Fuzz Target
+[[bin]]
+name = "mvcc_fuzz"
+path = "fuzz_targets/mvcc_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Transaction Fuzz Target
+[[bin]]
+name = "transaction_fuzz"
+path = "fuzz_targets/transaction_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Additional fuzz targets for expanded coverage
+# B+Tree specific fuzzing
+[[bin]]
+name = "btree_fuzz"
+path = "fuzz_targets/btree_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Record encoding/decoding fuzzing
+[[bin]]
+name = "record_fuzz"
+path = "fuzz_targets/record_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Tokenizer fuzzing
+[[bin]]
+name = "tokenizer_fuzz"
+path = "fuzz_targets/tokenizer_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Expression evaluation fuzzing
+[[bin]]
+name = "expression_fuzz"
+path = "fuzz_targets/expression_fuzz.rs"
+test = false
+doc = false
+bench = false

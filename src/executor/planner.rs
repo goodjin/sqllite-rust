@@ -10,7 +10,7 @@ use crate::storage::{BtreeDatabase, Value, Record};
 use super::{Result, ExecutorError, predicate_pushdown};
 
 /// Query execution plan
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum QueryPlan {
     /// Use covering index (all needed columns in index, no table lookup)
     CoveringIndexScan {
@@ -445,6 +445,10 @@ impl QueryPlanner {
                 }
                 SelectColumn::Expression(_, _) => {
                     // Expressions might reference other columns
+                    return false;
+                }
+                SelectColumn::WindowFunc(_, _) => {
+                    // Window functions might reference other columns
                     return false;
                 }
             }
@@ -893,6 +897,9 @@ mod tests {
                 nullable: false,
                 primary_key: true,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             ColumnDef {
                 name: "name".to_string(),
@@ -900,6 +907,9 @@ mod tests {
                 nullable: true,
                 primary_key: false,
                 foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();
