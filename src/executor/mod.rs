@@ -10,9 +10,11 @@ pub mod expr_cache;
 pub mod predicate_pushdown;
 pub mod plan_cache;
 pub mod phase5;
+pub mod query_optimizer;
 
 pub use result::{ExecutorError, Result};
 pub use planner::{QueryPlanner, QueryPlan, PlanExecutor};
+pub use query_optimizer::{ExecutorQueryOptimizer, OptimizedPlan, SimpleQueryPlanner};
 pub use expr_cache::{ExpressionCache, ExpressionCacheStats, ExpressionCacheKey, is_cacheable};
 pub use predicate_pushdown::{PushdownFilter, PredicatePushdownOptimizer, PushdownStats};
 pub use plan_cache::{PlanCache, PlanCacheStats, CachedPlan};
