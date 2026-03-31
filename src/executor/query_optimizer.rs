@@ -289,12 +289,20 @@ mod tests {
                 data_type: DataType::Integer,
                 nullable: false,
                 primary_key: true,
+                foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
             crate::sql::ast::ColumnDef {
                 name: "name".to_string(),
                 data_type: DataType::Text,
                 nullable: true,
                 primary_key: false,
+                foreign_key: None,
+                default_value: None,
+                is_virtual: false,
+                generated_always: None,
             },
         ];
         db.create_table("users".to_string(), columns).unwrap();

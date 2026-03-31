@@ -17,6 +17,10 @@
 - **索引**: B+ Tree 索引 + HNSW 向量索引
 - **高级 SQL**: JOIN、聚合函数、GROUP BY、ORDER BY、LIMIT/OFFSET
 - **预编译语句**: 语句缓存和参数化查询
+- **批量插入**: 批量插入优化，提升写入性能
+- **MVCC**: 多版本并发控制基础架构
+- **外键约束**: 支持 ON DELETE CASCADE/SET NULL/RESTRICT
+- **查询优化器**: 统计信息、代价模型、索引选择
 
 ### 与 SQLite 的对比
 
