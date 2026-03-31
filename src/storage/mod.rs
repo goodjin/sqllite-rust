@@ -12,8 +12,10 @@ pub mod prefix_compression;
 pub mod prefix_page;
 pub mod foreign_key;
 pub mod async_wal;
+pub mod mvcc_wrapper;
 
 pub use error::{StorageError, Result};
+pub use mvcc_wrapper::{MvccDatabase, Transaction, TransactionState};
 pub use record::{Record, Value};
 pub use table::{Database, Table};
 pub use btree::BPlusTreeIndex;
